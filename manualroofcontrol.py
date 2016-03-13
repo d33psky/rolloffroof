@@ -2,6 +2,7 @@
 
 import wiringpi2 as wp2
 import time
+import signal
 
 wp2.wiringPiSetup()
 
@@ -10,6 +11,19 @@ roof_closed_sensor1 = 12
 roof_motor_start_relay1 = 0
 roof_motor_direction_relay2 = 1
 green_button = 18
+
+received_signal = 0
+
+#kill -SIGUSR1 13534
+# https://docs.python.org/3/library/signal.html#signal.signal
+def signal_handler(signum, stack_frame):
+	global received_signal
+	print("*** signal_handler received:", signum)
+	received_signal = signum
+
+print(time.strftime("%Y%m%d_%H%M%S"), "Set up signal_handler")
+signal.signal(signal.SIGUSR1, signal_handler)
+signal.signal(signal.SIGUSR2, signal_handler)
 
 print(time.strftime("%Y%m%d_%H%M%S"), "Set up green_button as input")
 wp2.pinMode(green_button, wp2.GPIO.INPUT)
@@ -24,9 +38,15 @@ wp2.pinMode(roof_motor_start_relay1,	 wp2.GPIO.OUTPUT)
 wp2.pinMode(roof_motor_direction_relay2, wp2.GPIO.OUTPUT)
 
 def waitForButton(pin):
+		global received_signal
 		while True:
-				while wp2.digitalRead(pin) == True:
+				while wp2.digitalRead(pin) == True and received_signal == 0:
 						time.sleep(0.01)
+				# signal ?
+				if received_signal != 0:
+					print("Signal ", received_signal)
+					received_signal = 0
+					return True
 				# possible button press start
 				pressed_time = 0
 				while wp2.digitalRead(pin) == False:
@@ -41,7 +61,7 @@ def waitForButton(pin):
 try:
 	print("\n",time.strftime("%Y%m%d_%H%M%S"), "Wait for green button to start and make sure the roof is closed")
 	waitForButton(green_button)
-	print(time.strftime("%Y%m%d_%H%M%S"), "Green button pressed")
+	print(time.strftime("%Y%m%d_%H%M%S"), "Green button pressed or signal received")
 	time.sleep(1)
 
 	if not wp2.digitalRead(roof_closed_sensor1) :
@@ -50,8 +70,9 @@ try:
 		wp2.digitalWrite(roof_motor_start_relay1, wp2.GPIO.HIGH)   # start motor
 		print("\n",time.strftime("%Y%m%d_%H%M%S"), "Wait for right / roof-closed sensor")
 
-	while not wp2.digitalRead(roof_closed_sensor1) and wp2.digitalRead(green_button) :
+	while not wp2.digitalRead(roof_closed_sensor1) and wp2.digitalRead(green_button) and received_signal == 0:
 		pass
+	received_signal = 0
 	wp2.digitalWrite(roof_motor_start_relay1, wp2.GPIO.LOW)  # stop motor
 	wp2.digitalWrite(roof_motor_direction_relay2, wp2.GPIO.LOW) # roof open direction
 
@@ -61,7 +82,7 @@ try:
 	while True:
 		print("\n",time.strftime("%Y%m%d_%H%M%S"), "Wait for green button to open roof")
 		waitForButton(green_button)
-		print(time.strftime("%Y%m%d_%H%M%S"), "Green button pressed")
+		print(time.strftime("%Y%m%d_%H%M%S"), "Green button pressed or signal received")
 		time.sleep(1)
 
 		print(time.strftime("%Y%m%d_%H%M%S"), "Opening roof")
@@ -70,8 +91,9 @@ try:
 		wp2.digitalWrite(roof_motor_start_relay1, wp2.GPIO.HIGH)   # start motor
 
 		print("\n",time.strftime("%Y%m%d_%H%M%S"), "Wait for left / roof-open sensor")
-		while not wp2.digitalRead(roof_opened_sensor1) and wp2.digitalRead(green_button) :
+		while not wp2.digitalRead(roof_opened_sensor1) and wp2.digitalRead(green_button) and received_signal == 0:
 			pass
+		received_signal = 0
 		wp2.digitalWrite(roof_motor_start_relay1, wp2.GPIO.LOW)  # stop motor
 		wp2.digitalWrite(roof_motor_direction_relay2, wp2.GPIO.HIGH)  # roof close direction
 
@@ -80,7 +102,7 @@ try:
 
 		print("\n",time.strftime("%Y%m%d_%H%M%S"), "Wait for control switch to close roof")
 		waitForButton(green_button)
-		print(time.strftime("%Y%m%d_%H%M%S"), "Green button pressed")
+		print(time.strftime("%Y%m%d_%H%M%S"), "Green button pressed or signal received")
 		time.sleep(1)
 	
 		print(time.strftime("%Y%m%d_%H%M%S"), "Closing roof")
@@ -89,8 +111,9 @@ try:
 		wp2.digitalWrite(roof_motor_start_relay1, wp2.GPIO.HIGH)   # start motor
 	
 		print("\n",time.strftime("%Y%m%d_%H%M%S"), "Wait for right / roof-closed sensor")
-		while not wp2.digitalRead(roof_closed_sensor1) and wp2.digitalRead(green_button) :
+		while not wp2.digitalRead(roof_closed_sensor1) and wp2.digitalRead(green_button) and received_signal == 0:
 			pass
+		received_signal = 0
 		wp2.digitalWrite(roof_motor_start_relay1, wp2.GPIO.LOW)  # stop motor
 		wp2.digitalWrite(roof_motor_direction_relay2, wp2.GPIO.LOW) # roof open direction
 	
