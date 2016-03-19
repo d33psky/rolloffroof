@@ -31,8 +31,8 @@ my $ups_online = readSHM("state_ups_online");
 
 my $raindrop_sum = readSHM("value_raindrop_sum");
 
-my $imaging_computer_power = readSHM("state_relay4");
-my $imaging_equipment_power = readSHM("state_relay3");
+my $imaging_computer_power = readSHM("state_relay3");
+my $imaging_equipment_power = readSHM("state_relay4");
 my $mount_power = readSHM("state_relay6");
 my $roof_motor_power = readSHM("state_relay7");
 
