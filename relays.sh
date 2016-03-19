@@ -5,7 +5,8 @@ set -o pipefail # be trigger-happy to be reliable
 
 #set -x
 
-TASKLIST="wake sleep all lap mount roof rest"
+RELAYS="lap mount roof rest"
+TASKLIST="wake sleep all $RELAYS"
 declare -A TASKS
 for task in $TASKLIST; do
 	TASKS[$task]=0
@@ -18,11 +19,6 @@ for arg in $@; do
 		fi
 	done
 done
-
-#for task in "${!TASKS[@]}"; do
-#	echo -n "$task=${TASKS[$task]} "
-#done
-#echo
 
 readStates() {
 	imaging_computer_power=$(cat /dev/shm/state_relay3)
@@ -50,7 +46,7 @@ else
 fi
 
 if [[ ${TASKS['all']} -eq 1 ]]; then
-	for task in $TASKLIST; do
+	for task in $RELAYS; do
 		TASKS[$task]=1
 	done
 fi
