@@ -91,7 +91,7 @@ if [[ ${TASKS['rest']} -eq 1 ]]; then
 fi
 
 if [[ ${TASKS['roof']} -eq 1 ]]; then
-	if [[ $imaging_equipment_power == $ACTION_IF ]]; then
+	if [[ $roof_motor_power == $ACTION_IF ]]; then
 		echo "$ACTION_STR roof motor now:"
 		/root/relay_0-7_low-high.py 7 $ACTION_RELAY
 	else
