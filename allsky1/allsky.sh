@@ -31,7 +31,7 @@ while :; do
 	START=$NOW
 
 	T=$(date '+%Y%m%d_%H%M%S')
-	echo $T
+	echo "$T shutterspeed = $SHUTTERSPEED"
 
 	ISO=800
 
