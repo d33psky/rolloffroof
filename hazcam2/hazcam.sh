@@ -11,9 +11,11 @@ TARGETPERIOD=60
 
 AVERAGEVALUE=0
 SHUTTERSPEED=2
-SHUTTERSPEED=100000
 SHUTTERSPEED=6000000
 SHUTTERSPEED=4000000
+SHUTTERSPEED=100000
+
+ISO=800
 
 while :; do 
 	NOW=$(date '+%s')
@@ -22,10 +24,13 @@ while :; do
 	T=$(date '+%Y%m%d_%H%M%S')
 	echo "$T shutterspeed = $SHUTTERSPEED"
 
-	raspistill -v -n -ex verylong -mm spot -t 1000 -ss $SHUTTERSPEED -q 100 -ISO 800 -o ${T}-rpi2.jpg
+	raspistill -v -n -ex verylong -mm spot -t 1000 -ss $SHUTTERSPEED -q 100 -ISO $ISO -o ${T}-rpi2.jpg
 
 	echo "Calculate average"
-	AVERAGEVALUE=$(cat ${T}-rpi2.jpg|convert -crop 1750x1944 - - |convert -resize 1x1 - txt: |tail -1|sed -e's/0,0: (//' -e's/,/ /g'|awk '{ printf "%.0f\n", ($1+$2+$3)/3 }')
+    # ImageMagick pixel enumeration: 1,1,255,srgb
+    #AVERAGEVALUE=$(cat ${T}-rpi2.jpg|convert -crop 1750x1944 - - |convert -resize 1x1 - txt: |tail -1|sed -e's/0,0: (//' -e's/,/ /g'|awk '{ printf "%.0f\n", ($1+$2+$3)/3 }')
+    # ImageMagick pixel enumeration: 1,1,65535,srgb
+	AVERAGEVALUE=$(cat ${T}-rpi2.jpg|convert -crop 1750x1944 - - |convert -resize 1x1 - txt: |tail -1|sed -e's/0,0: (//' -e's/,/ /g'|awk '{ printf "%.0f\n", 256*(($1+$2+$3)/3)/65535 }')
 	echo "AVERAGEVALUE=$AVERAGEVALUE"
 
 	OLDSHUTTERSPEED=$SHUTTERSPEED
@@ -87,6 +92,7 @@ while :; do
 	mv /mnt/live/hazcam2_temp3.jpg /mnt/live/hazcam2.jpg
 
 	if [[ $MUSTGOFAST -eq 1 ]]; then
+        echo "do not sleep $SLEEP because MUSTGOFAST is set"
 		continue
 	fi
 
