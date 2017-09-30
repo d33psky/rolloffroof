@@ -39,17 +39,23 @@ while :; do
 
 #	AVERAGEVALUE=$(convert ${T}-rpi3.jpg -resize 1x1 txt: |tail -1|sed -e's/0,0: (//' -e's/,/ /g'|awk '{ printf "%.0f\n", ($1+$2+$3)/3 }')
 	echo "Calculate average"
-	AVERAGEVALUE=$(cat ${T}-rpi3.jpg|convert -crop 1750x1944 - - |convert -resize 1x1 - txt: |tail -1|sed -e's/0,0: (//' -e's/,/ /g'|awk '{ printf "%.0f\n", ($1+$2+$3)/3 }')
-	echo "AVERAGEVALUE=$AVERAGEVALUE"
+	#AVERAGEVALUE=$(cat ${T}-rpi3.jpg|convert -crop 1750x1944 - - |convert -resize 1x1 - txt: |tail -1|sed -e's/0,0: (//' -e's/,/ /g'|awk '{ printf "%.0f\n", ($1+$2+$3)/3 }')
+	#echo "AVERAGEVALUE=$AVERAGEVALUE"
+	AVERAGERGB=$(cat ${T}-rpi3.jpg|convert -crop 1750x1944 - - |convert -resize 1x1 - txt: |tail -1|sed -e's/0,0: (//' -e's/,/ /g'|awk '{ printf "%.0f %.0f %.0f\n", $1,$2,$3 }')
+	RED=$(  echo $AVERAGERGB|cut -d' ' -f 1)
+	GREEN=$(echo $AVERAGERGB|cut -d' ' -f 2)
+	BLUE=$( echo $AVERAGERGB|cut -d' ' -f 3)
+	AVERAGEVALUE=$(echo $AVERAGERGB|awk '{ printf "%.0f\n", ($1+$2+$3)/3 }')
+	echo "RGB = $RED $GREEN $BLUE AVERAGEVALUE=$AVERAGEVALUE"
 
-	if [[ $SHUTTERSPEED -eq 6000000 && $AVERAGEVALUE -lt 20 ]]; then
-		echo "count stars"
-		S=$(cat ${T}-rpi3.jpg|jpegtopnm 2>/dev/null|ppmtopgm|convert -crop 1750x1944 - - |convert - crop.fits && image2xy -O -g 9 crop-0.fits|awk '{ print $3 }')
-		echo "stars=[$S]"
-	else
-		echo "SHUTTERSPEED/AVERAGEVALUE combo is too bright, do not bother counting stars"
+#	if [[ $SHUTTERSPEED -eq 6000000 && $AVERAGEVALUE -lt 20 ]]; then
+#		echo "count stars"
+#		S=$(cat ${T}-rpi3.jpg|jpegtopnm 2>/dev/null|ppmtopgm|convert -crop 1750x1944 - - |convert - crop.fits && image2xy -O -g 9 crop-0.fits|awk '{ print $3 }')
+#		echo "stars=[$S]"
+#	else
+#		echo "SHUTTERSPEED/AVERAGEVALUE combo is too bright, do not bother counting stars"
 		S=0
-	fi
+#	fi
 
 	OLDSHUTTERSPEED=$SHUTTERSPEED
 	echo -n "SHUTTERSPEED=$SHUTTERSPEED , adjust to "
@@ -129,7 +135,7 @@ while :; do
 
 	OLDEXPOSURE=$(/bin/echo "scale=6; $OLDSHUTTERSPEED/1000000" | /usr/bin/bc -l)
 	NEWEXPOSURE=$(/bin/echo "scale=6; $SHUTTERSPEED/1000000" | /usr/bin/bc -l)
-	LINE="allskycam1 rpi3\n$(date -u '+%Y-%m-%dT%H:%M:%SZ')\nAverage pixel value = $AVERAGEVALUE\nExposure $OLDEXPOSURE s\n (next $NEWEXPOSURE)\nISO=$ISO\n (next $ISO)\nStars = $S\nSleep $SLEEP s"
+	LINE="allskycam1 rpi3\n$(date -u '+%Y-%m-%dT%H:%M:%SZ')\nRGB $RED $GREEN $BLUE ($AVERAGEVALUE)\nExposure $OLDEXPOSURE s\n (next $NEWEXPOSURE)\nISO $ISO\n (next $ISO)\nSleep $SLEEP s"
 	echo "convert /mnt/live/allsky_temp2.jpg -fill white -pointsize 60 -annotate +50+90 "$LINE" /mnt/live/allsky_temp3.jpg"
 	convert /mnt/live/allsky_temp2.jpg -fill white -pointsize 60 -annotate +50+90 "$LINE" /mnt/live/allsky_temp3.jpg
 
