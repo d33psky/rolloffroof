@@ -5,13 +5,16 @@ set -e
 cd /mnt/nas/tmp/
 
 TARGETPERIOD=60
-
 AVERAGEVALUE=0
 TARGETVALUE=128
+
 SHUTTERSPEED=6000000
 SHUTTERSPEED=400000
 SHUTTERSPEED=1
 SHUTTERSPEED=100
+SHUTTERSPEED=20
+SHUTTERSPEED=10000
+SHUTTERSPEED=1000000
 
 while :; do 
 	NOW=$(date '+%s')
@@ -38,12 +41,12 @@ while :; do
 	BLUE=$( echo $AVERAGERGB|cut -d' ' -f 3)
 	AVERAGEVALUE=$(echo $AVERAGERGB|awk '{ printf "%.0f\n", ($1+$2+$3)/3 }')
 	T=$(date '+%Y%m%d_%H%M%S')
-	echo -n "$T RGB = $RED $GREEN $BLUE AVERAGEVALUE=$AVERAGEVALUE "
+	echo -n "$T RGB = $RED $GREEN $BLUE AVERAGE=$AVERAGEVALUE "
 	OLDSHUTTERSPEED=$SHUTTERSPEED
 	DELTAAVERAGEVALUE=$((TARGETVALUE - AVERAGEVALUE)) # range: 128-1=127, or 128-255=-127
-	DELTAFACTOR=$((1 + (OLDSHUTTERSPEED/6000))) # range 1..101
+	DELTAFACTOR=$((1 + (OLDSHUTTERSPEED/200))) # range 1..3001
 	SHUTTERSPEED=$((SHUTTERSPEED + (DELTAFACTOR * DELTAAVERAGEVALUE)))
-	echo "DELTAAVERAGEVALUE=$DELTAAVERAGEVALUE DELTAFACTOR=$DELTAFACTOR SHUTTERSPEED=${OLDSHUTTERSPEED}->${SHUTTERSPEED}"
+	echo "DELTAAVERAGE=$DELTAAVERAGEVALUE DELTAFACTOR=$DELTAFACTOR SHUTTERSPEED=${OLDSHUTTERSPEED}->${SHUTTERSPEED}"
 
 	if [[ $SHUTTERSPEED -gt 6000000 ]]; then
 		echo "SHUTTERSPEED=$SHUTTERSPEED too large, set to max 6000000"
@@ -86,7 +89,7 @@ while :; do
 	echo "$T mv /mnt/live/allsky_temp3.jpg /mnt/live/allsky.jpg"
 	mv /mnt/live/allsky_temp3.jpg /mnt/live/allsky.jpg
 
-	/usr/bin/logger -t ${0##*/} -i "ShutterSpeed $OLDSHUTTERSPEED resulted in AverageValue $AVERAGEVALUE, new ShutterSpeed $SHUTTERSPEED"
+	/usr/bin/logger -t ${0##*/} -i "Exposure $OLDEXPOSURE s, Average $AVERAGEVALUE, Factor $DELTAFACTOR new exposure $NEWEXPOSURE s"
 
 	echo "update allskycamstars.rrd -t stars N:$S > /dev/shm/rrdupdate_allskycamstars"
 	echo "update allskycamstars.rrd -t stars N:$S" > /dev/shm/rrdupdate_allskycamstars
