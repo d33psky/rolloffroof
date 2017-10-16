@@ -8,13 +8,13 @@ TARGETPERIOD=60
 AVERAGEVALUE=0
 TARGETVALUE=128
 
-SHUTTERSPEED=6000000
 SHUTTERSPEED=400000
 SHUTTERSPEED=1
 SHUTTERSPEED=100
 SHUTTERSPEED=20
 SHUTTERSPEED=10000
 SHUTTERSPEED=1000000
+SHUTTERSPEED=6000000
 
 while :; do 
 	NOW=$(date '+%s')
@@ -65,6 +65,11 @@ while :; do
 		echo "$T it is too bright, do not bother counting stars"
 		S=0
 	fi
+
+	if [[ $RED -eq 0 && $GREEN -gt 200 && $BLUE -eq 0 ]]; then
+        echo "ANOMALY correct, set to min 100"
+        SHUTTERSPEED=100
+    fi
 
 	T=$(date '+%Y%m%d_%H%M%S')
     NOW=$(date '+%s')
