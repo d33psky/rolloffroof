@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 
-import wiringpi2 as wp2
+import wiringpi as wp
 import time
 import sys
 
-wp2.wiringPiSetup()
+wp.wiringPiSetup()
 
 relay0=0
 relay1=1
@@ -22,9 +22,9 @@ relay=sys.argv[1]
 state=sys.argv[2]
 
 if state == "high" :
-	gpiostate = wp2.GPIO.HIGH
+	gpiostate = wp.GPIO.HIGH
 elif state == "low" :
-	gpiostate = wp2.GPIO.LOW
+	gpiostate = wp.GPIO.LOW
 else :
 	print("need state high or low")
 	sys.exit(1)
@@ -37,19 +37,19 @@ stateFile.close()
 
 #quit()
 
-wp2.pinMode(int(relay), wp2.GPIO.OUTPUT)
+wp.pinMode(int(relay), wp.GPIO.OUTPUT)
 
 #print("write :")
 
-wp2.digitalWrite(int(relay), gpiostate)
+wp.digitalWrite(int(relay), gpiostate)
 
 #print("high")
-#wp2.digitalWrite(relay, wp2.GPIO.HIGH)
+#wp.digitalWrite(relay, wp.GPIO.HIGH)
 
 #time.sleep(3.0)
 
 #print("low")
-#wp2.digitalWrite(relay, wp2.GPIO.LOW)
+#wp.digitalWrite(relay, wp.GPIO.LOW)
 
 #print("quit")
 quit()
