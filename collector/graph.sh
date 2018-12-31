@@ -1,6 +1,7 @@
 #!/bin/bash
 
 WHICHONE="$1"
+TARGET_DIR="/webs/lambermont.dyndns.org/www/astro/rrd"
 
 if [ -z "$WHICHONE" ]; then
 	WHICHONE="all"
@@ -9,7 +10,7 @@ fi
 mytest() {
 
 minmax=`rrdtool graph \
-			-A /var/www/html/obsenv1.png --start now-1d \
+			-A ${TARGET_DIR}/obsenv1.png --start now-1d \
 			--title "Observatory environment, last 24h" \
 			--vertical-label "temperature [C]" \
 			--right-axis-label "humidity [%]" \
@@ -108,7 +109,7 @@ exit 0
 tempandhumiditytest() {
 
 	minmax=`rrdtool graph \
-			-A /var/www/html/obsenv1.png --start now-1d \
+			-A ${TARGET_DIR}/obsenv1.png --start now-1d \
 			--title "Observatory environment, last 24h" \
 			--vertical-label "temperature [C]" \
 			--right-axis-label "humidity [%]" \
@@ -204,7 +205,7 @@ rashift=`echo "-1 * $hummin * $rascale" | bc -l`
 #			--right-axis 1:0 \
 #
 rrdtool graph \
-			-A /var/www/html/obsenv1.png --start now-1d \
+			-A ${TARGET_DIR}/obsenv1.png --start now-1d \
 			--title "Observatory environment, last 24h" \
 			--vertical-label "temperature [C]" \
 			--right-axis-label "humidity [%]" \
@@ -272,7 +273,7 @@ GPRINT:hum9min:"%6.2lf\t%%\\l" \
 tempandhumidity()
 {
 rrdtool graph \
-			-A /var/www/html/obsenv1.png --start now-1d \
+			-A ${TARGET_DIR}/obsenv1.png --start now-1d \
 			--title "Observatory environment, last 24h" \
 			--vertical-label "temperature [C]" \
 			--right-axis-label "humidity [%]" \
@@ -341,7 +342,7 @@ humidity()
 	local period="$2"
 	declare -a RRD
 	RRD=("rrdtool graph")
-	RRD+=("-A /var/www/html/${FUNCNAME}_${size}_${period}.png")
+	RRD+=("-A ${TARGET_DIR}/${FUNCNAME}_${size}_${period}.png")
 	RRD+=("--start $period")
 	RRD+=("--title 'Humidity, $period'")
 	RRD+=("--vertical-label 'humidity [%]'")
@@ -388,7 +389,7 @@ dew() {
 	local period="$2"
 	declare -a RRD
 	RRD=("rrdtool graph")
-	RRD+=("-A /var/www/html/${FUNCNAME}_${size}_${period}.png")
+	RRD+=("-A ${TARGET_DIR}/${FUNCNAME}_${size}_${period}.png")
 	RRD+=("--start $period")
 	RRD+=("--title 'Temperature and Dewpoint, $period'")
 	RRD+=("--vertical-label 'temperature [C]'")
@@ -423,8 +424,10 @@ dew() {
 	RRD+=("VDEF:dcammax=dcam,MAXIMUM")
 	RRD+=("VDEF:dcamavg=dcam,AVERAGE")
 	RRD+=("VDEF:dcammin=dcam,MINIMUM")
-	RRD+=("COMMENT:'\t\t\t\t\tlast     max       avg       min\l'")
-	RRD+=("LINE1:temp8#0000FF:'Outside Temperature\t'")
+#	RRD+=("COMMENT:'\t\t\t\t\tlast     max       avg       min\l'")
+	RRD+=("COMMENT:'\t\t\t\t\t\t\ttime [h]\n'")
+	RRD+=("COMMENT:'\t\t\t\tlast\t    max\t   avg\t  min\l'")
+	RRD+=("LINE1:temp8#0000FF:'Outside Temperature\t\t'")
 	RRD+=("GPRINT:temp8:LAST:'%6.2lf\t'")
 	RRD+=("GPRINT:temp8max:'%6.2lf\t'")
 	RRD+=("GPRINT:temp8avg:'%6.2lf\t'")
@@ -434,7 +437,7 @@ dew() {
 	RRD+=("GPRINT:temp9max:'%6.2lf\t'")
 	RRD+=("GPRINT:temp9avg:'%6.2lf\t'")
 	RRD+=("GPRINT:temp9min:'%6.2lf\tC\l'")
-	RRD+=("LINE1:tcam#00FF00:'PiBucketCamera Temp.\t'")
+	RRD+=("LINE1:tcam#00FF00:'PiBucketCamera Temp.\t\t'")
 	RRD+=("GPRINT:tcam:LAST:'%6.2lf\t'")
 	RRD+=("GPRINT:tcammax:'%6.2lf\t'")
 	RRD+=("GPRINT:tcamavg:'%6.2lf\t'")
@@ -444,7 +447,7 @@ dew() {
 	RRD+=("GPRINT:dew8max:'%6.2lf\t'")
 	RRD+=("GPRINT:dew8avg:'%6.2lf\t'")
 	RRD+=("GPRINT:dew8min:'%6.2lf\tC\l'")
-	RRD+=("LINE1:dew9#FF00FF:'Observatory Dewpoint\t'")
+	RRD+=("LINE1:dew9#FF00FF:'Observatory Dewpoint\t\t'")
 	RRD+=("GPRINT:dew9:LAST:'%6.2lf\t'")
 	RRD+=("GPRINT:dew9max:'%6.2lf\t'")
 	RRD+=("GPRINT:dew9avg:'%6.2lf\t'")
@@ -462,7 +465,7 @@ dew-old() {
 	local period="$2"
 	declare -a RRD
 	RRD=("rrdtool graph")
-	RRD+=("-A /var/www/html/${FUNCNAME}_${size}_${period}.png")
+	RRD+=("-A ${TARGET_DIR}/${FUNCNAME}_${size}_${period}.png")
 	RRD+=("--start $period")
 	RRD+=("--title 'Temperature and Dewpoint, $period'")
 	RRD+=("--vertical-label 'temperature [C]'")
@@ -518,7 +521,7 @@ temp() {
 	local period="$2"
 	declare -a RRD
 	RRD=("rrdtool graph")
-	RRD+=("-A /var/www/html/${FUNCNAME}_${size}_${period}.png")
+	RRD+=("-A ${TARGET_DIR}/${FUNCNAME}_${size}_${period}.png")
 	RRD+=("--start $period")
 	RRD+=("--title 'Temperature, $period'")
 	RRD+=("--vertical-label 'temperature [C]'")
@@ -537,9 +540,9 @@ temp() {
 	RRD+=("VDEF:temp9max=temp9,MAXIMUM")
 	RRD+=("VDEF:temp9avg=temp9,AVERAGE")
 	RRD+=("VDEF:temp9min=temp9,MINIMUM")
-	RRD+=("COMMENT:'\t\t\t\t\t\t\t\t\t\t\t\t\ttime [h]\n'")
-	RRD+=("COMMENT:'\t\t\t\t\tlast\t\t    max\t   avg\t  min\l'")
-	RRD+=("LINE1:temp8#0000FF:'Outside Temperature\t'")
+	RRD+=("COMMENT:'\t\t\t\t\t\t\ttime [h]\n'")
+	RRD+=("COMMENT:'\t\t\t\t  last\t   max\t   avg\t   min\l'")
+	RRD+=("LINE1:temp8#0000FF:'Outside Temperature\t\t'")
 	RRD+=("GPRINT:temp8:LAST:'%6.2lf\t'")
 	RRD+=("GPRINT:temp8max:'%6.2lf\t'")
 	RRD+=("GPRINT:temp8avg:'%6.2lf\t'")
@@ -557,7 +560,7 @@ rain() {
 	local period="$2"
 	declare -a RRD
 	RRD=("rrdtool graph")
-	RRD+=("-A /var/www/html/${FUNCNAME}_${size}_${period}.png")
+	RRD+=("-A ${TARGET_DIR}/${FUNCNAME}_${size}_${period}.png")
 	RRD+=("--start $period")
 	RRD+=("--title 'Rain sensor drops, $period'")
 	RRD+=("--vertical-label '[drops/min]'")
@@ -588,17 +591,54 @@ sqm() {
 	local period="$2"
 	declare -a RRD
 	RRD=("rrdtool graph")
-	RRD+=("-A /var/www/html/${FUNCNAME}_${size}_${period}.png")
+	RRD+=("-A ${TARGET_DIR}/${FUNCNAME}_${size}_${period}.png")
 	RRD+=("--start $period")
 	RRD+=("--title 'Sky Brightness, $period'")
 	RRD+=("--vertical-label '[magnitude/arcsec^2]'")
 	RRD+=("--right-axis 1:0")
+	if [[ $size == "huge" ]]; then
+		RRD+=("--width 2000 --height 500")
+	fi
 	if [[ $size == "large" ]]; then
 		RRD+=("--width 1000 --height 500")
 	fi
 	if [[ $period == "now-1d" ]]; then
 		RRD+=("--x-grid DAY:1:HOUR:1:HOUR:1:0:%H")
 	fi
+	RRD+=("DEF:sqm=sqm.rrd:sqm:MAX") # ERROR: the RRD does not contain an RRA matching the chosen CF
+#	RRD+=("DEF:sqm=sqm.rrd:sqm:AVERAGE")
+	RRD+=("VDEF:sqmmax=sqm,MAXIMUM")
+	RRD+=("VDEF:sqmavg=sqm,AVERAGE")
+	RRD+=("VDEF:sqmmin=sqm,MINIMUM")
+	RRD+=("COMMENT:'\t\t\t\t\t\t\t\t\t\t\t\t\ttime [h]\n'")
+	RRD+=("COMMENT:'\t\t\t\tlast\t\t    max\t   avg\t  min\l'")
+	RRD+=("LINE1:sqm#0000FF:'Sky Brightness\t'")
+	RRD+=("GPRINT:sqm:LAST:'%6.2lf\t'")
+	RRD+=("GPRINT:sqmmax:'%6.2lf\t'")
+	RRD+=("GPRINT:sqmavg:'%6.2lf\t'")
+	RRD+=("GPRINT:sqmmin:'%6.2lf\t\l'")
+	eval ${RRD[@]}
+}
+
+sqmtest() {
+	local size="$1"
+	local start="$2"
+	local end="$3"
+	declare -a RRD
+	RRD=("rrdtool graph")
+	RRD+=("-A ${TARGET_DIR}/${FUNCNAME}_${size}_${start}_${end}.png")
+	RRD+=("--start $start")
+	RRD+=("--end $end")
+	RRD+=("--title 'Sky Brightness, $start $end'")
+	RRD+=("--vertical-label '[magnitude/arcsec^2]'")
+	RRD+=("--right-axis 1:0")
+	if [[ $size == "large" ]]; then
+		RRD+=("--width 1000 --height 500")
+	fi
+	if [[ $start == "now-1d" ]]; then
+		RRD+=("--x-grid DAY:1:HOUR:1:HOUR:1:0:%H")
+	fi
+#	RRD+=("DEF:sqm=sqm.rrd:sqm:MAX") # ERROR: the RRD does not contain an RRA matching the chosen CF
 	RRD+=("DEF:sqm=sqm.rrd:sqm:AVERAGE")
 	RRD+=("VDEF:sqmmax=sqm,MAXIMUM")
 	RRD+=("VDEF:sqmavg=sqm,AVERAGE")
@@ -618,7 +658,7 @@ luminosity() {
 	local period="$2"
 	declare -a RRD
 	RRD=("rrdtool graph")
-	RRD+=("-A /var/www/html/${FUNCNAME}_${size}_${period}.png")
+	RRD+=("-A ${TARGET_DIR}/${FUNCNAME}_${size}_${period}.png")
 	RRD+=("--start $period")
 	RRD+=("--title 'Sky Luminosity, $period'")
 	RRD+=("--vertical-label 'luminosity [lx]'")
@@ -630,7 +670,7 @@ luminosity() {
 	if [[ $period == "now-1d" ]]; then
 		RRD+=("--x-grid DAY:1:HOUR:1:HOUR:1:0:%H")
 	fi
-	RRD+=("DEF:luminosity=luminosity.rrd:luminosity:AVERAGE")
+	RRD+=("DEF:luminosity=luminosity.rrd:luminosity:MAX")
 	RRD+=("VDEF:luminositymax=luminosity,MAXIMUM")
 	RRD+=("VDEF:luminosityavg=luminosity,AVERAGE")
 	RRD+=("VDEF:luminositymin=luminosity,MINIMUM")
@@ -649,7 +689,7 @@ skytemp() {
 	local period="$2"
 	declare -a RRD
 	RRD=("rrdtool graph")
-	RRD+=("-A /var/www/html/${FUNCNAME}_${size}_${period}.png")
+	RRD+=("-A ${TARGET_DIR}/${FUNCNAME}_${size}_${period}.png")
 	RRD+=("--start $period")
 	RRD+=("--title 'Sky Temperature, $period'")
 	RRD+=("--vertical-label 'temperature [C]'")
@@ -705,7 +745,7 @@ ups() {
 	local period="$2"
 	declare -a RRD
 	RRD=("rrdtool graph")
-	RRD+=("-A /var/www/html/${FUNCNAME}_${size}_${period}.png")
+	RRD+=("-A ${TARGET_DIR}/${FUNCNAME}_${size}_${period}.png")
 	RRD+=("--start $period")
 	RRD+=("--title 'UPS, $period'")
 	RRD+=("--vertical-label 'various'")
@@ -736,33 +776,88 @@ ups() {
 	eval ${RRD[@]}
 }
 
+allskycamstars() {
+	local size="$1"
+	local period="$2"
+	declare -a RRD
+	RRD=("rrdtool graph")
+	RRD+=("-A ${TARGET_DIR}/${FUNCNAME}_${size}_${period}.png")
+	RRD+=("--start $period")
+	RRD+=("--title 'AllSkyCamera Stars, $period'")
+	RRD+=("--vertical-label 'stars [n]'")
+	RRD+=("--right-axis 1:0")
+	RRD+=("--lower-limit 0 --rigid")
+	if [[ $size == "large" ]]; then
+		RRD+=("--width 1000 --height 500")
+	fi
+	if [[ $period == "now-1d" ]]; then
+		RRD+=("--x-grid DAY:1:HOUR:1:HOUR:1:0:%H")
+	fi
+	RRD+=("DEF:stars=allskycamstars.rrd:stars:MAX")
+	RRD+=("VDEF:starsmax=stars,MAXIMUM")
+	RRD+=("VDEF:starsavg=stars,AVERAGE")
+	RRD+=("VDEF:starsmin=stars,MINIMUM")
+	RRD+=("COMMENT:'\t\t\t\t\t\t\t\t\t\t\t\t\ttime [h]\n'")
+	RRD+=("COMMENT:'\t\t\t\tlast\t\t    max\t   avg\t  min\l'")
+	RRD+=("LINE1:stars#0000FF:'AllSkyCam Stars\t'")
+	RRD+=("GPRINT:stars:LAST:'%6.0lf\t'")
+	RRD+=("GPRINT:starsmax:'%6.0lf\t'")
+	RRD+=("GPRINT:starsavg:'%6.0lf\t'")
+	RRD+=("GPRINT:starsmin:'%6.0lf\t\l'")
+	eval ${RRD[@]}
+}
+
+# time notation https://oss.oetiker.ch/rrdtool/doc/rrdfetch.en.html
+
 case $WHICHONE in
 all)
 	tempandhumidity
 	dew small now-1d
 	dew large now-1d
 	dew large now-1w
+	dew large now-1m
+	dew large now-1y
 	temp small now-1d
 	temp large now-1d
 	temp large now-1w
+	temp large now-1m
+	temp large now-1y
 	rain small now-1d
 	rain large now-1d
 	rain large now-1w
+	rain large now-1m
+	rain large now-1y
 	humidity small now-1d
 	humidity large now-1d
 	humidity large now-1w
+	humidity large now-1m
+	humidity large now-1y
 	sqm small now-1d
 	sqm large now-1d
 	sqm large now-1w
+	sqm large now-1m
+#	sqm huge now-6months
+	sqm large now-1y
 	luminosity small now-1d
 	luminosity large now-1d
 	luminosity large now-1w
+	luminosity large now-1m
+	luminosity large now-1y
 	skytemp small now-1d
 	skytemp large now-1d
 	skytemp large now-1w
+	skytemp large now-1m
+	skytemp large now-1y
 	ups small now-1d
 	ups large now-1d
 	ups large now-1w
+	ups large now-1m
+	ups large now-1y
+	allskycamstars small now-1d
+	allskycamstars large now-1d
+	allskycamstars large now-1w
+	allskycamstars large now-1m
+	allskycamstars large now-1y
 	;;
 1)
 	tempandhumidity
@@ -792,6 +887,9 @@ sqm)
 	sqm large now-1d
 	sqm large now-1w
 	;;
+sqmtest)
+	sqmtest large 20160109 start+1d
+	;;
 luminosity)
 	luminosity small now-1d
 	luminosity large now-1d
@@ -812,5 +910,6 @@ ups)
 	;;
 esac
 
-# publish
+#scp /var/www/html/*.png hans@webs:/webs/lambermont.dyndns.org/www/astro/
+#scp /var/www/html/*.png hans@lxc-webs:/webs/lambermont.dyndns.org/www/astro/
 
