@@ -3,6 +3,7 @@
 import sys
 import MySQLdb
 import datetime
+import subprocess
 
 # update skytemperature-BAA.rrd -t BAA_sensor:BAA_sky N:8.06:4.06
 #
@@ -108,7 +109,11 @@ while i < len(keys):
     i += 1
 
 sql = """
-SELECT sensors_id,create_time FROM sensors ORDER BY create_time DESC LIMIT 1;
+  SELECT sensors_id
+         ,create_time
+    FROM sensors
+ORDER BY create_time DESC
+   LIMIT 1;
 """
 db_cursor.execute(sql)
 db_result_tuple = db_cursor.fetchone()
@@ -123,6 +128,10 @@ except:
 
 if must_insert or db_date < datetime.datetime.utcnow() - datetime.timedelta(minutes=1) :
     print("{} is More than a minute ago -> INSERT".format(db_date))
+
+    print("Hack: but first call ./query_sky_and_obsy_conditions.py")
+    subprocess.call("./query_sky_and_obsy_conditions.py")
+
     sql_keys.append("create_time")
     sql_values.append('"' + str(utcnow) + '"')
     sql = """
