@@ -3,7 +3,9 @@
 import sys
 import MySQLdb
 import datetime
-
+import json
+import requests
+from pathlib import Path
 
 database = MySQLdb.connect(
     host="lxc-rrd",
@@ -188,7 +190,35 @@ def check_infrared_past(sensor, minimum_delta_t, seconds, outlier_count_max):
         print("Sensor {sensor} sky temperature delta < {minimum_delta_t} count over the last {seconds} seconds is {count} > {outlier_count_max} -> close".format(sensor=sensor, minimum_delta_t=minimum_delta_t, seconds=seconds, count=count, outlier_count_max=outlier_count_max))
         return(False)
 
+def retrieve_previous_open_ok():
+    sql = """
+      SELECT create_time,open_ok
+        FROM roof
+    ORDER BY roof_id DESC
+       LIMIT 1;
+    """
+    db_cursor.execute(sql)
+    db_result_tuple = db_cursor.fetchone()
+    last_open_ok = db_result_tuple[1]
+    return(last_open_ok)
+
+def sendToMattermost(url, message):
+    payload = {}
+    payload['text'] = message
+    r = requests.post(url, data={'payload': json.dumps(payload, sort_keys=True, indent=4)})
+    if r.status_code != 200:
+        try:
+            r = json.loads(r.text)
+        except ValueError:
+            r = {'message': r.text, 'status_code': r.status_code}
+            raise RuntimeError("{} ({})".format(r['message'], r['status_code']))
+
 def main():
+    home = str(Path.home())
+    mattermost_url_file = open(home + "/.mattermosturl", 'r')
+    url = mattermost_url_file.read().rstrip('\n')
+    mattermost_url_file.close()
+
     sensors_id       = check_db(minutes=2)
     sqm_now_ok       = check_sqm(sensors_id, sqm_min=17.5)
     rain_now_ok      = check_rain(sensors_id, drops_min=1)
@@ -251,14 +281,19 @@ def main():
 
     if sensors_id and sqm_now_ok and sqm_past_ok and rain_now_ok and rain_past_ok and ups_now_ok and (infrared1_now_ok or infrared2_now_ok) and (infrared1_past_ok or infrared2_past_ok):
         open_ok = True
+        open_ok_str = "OK to open: "
         reasons = "{}".format(', '.join(reason_open))
 #        print("roof open ok, {}".format(', '.join(reason_open)))
     else:
         open_ok = False
+        open_ok_str = "Must close: "
         reasons = "{}".format(', '.join(reason_close))
 #        print("roof open not ok: {}".format(', '.join(reason_close)))
 
     print(reasons)
+    last_open_ok = retrieve_previous_open_ok()
+    if bool(last_open_ok) != open_ok:
+        sendToMattermost(url, open_ok_str + reasons)
 
     utcnow = datetime.datetime.utcnow()
     sql_keys = []
