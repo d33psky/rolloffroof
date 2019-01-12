@@ -282,7 +282,8 @@ def main():
     if sensors_id and sqm_now_ok and sqm_past_ok and rain_now_ok and rain_past_ok and ups_now_ok and (infrared1_now_ok or infrared2_now_ok) and (infrared1_past_ok or infrared2_past_ok):
         open_ok = True
         open_ok_str = "OK to open: "
-        reasons = "{}".format(', '.join(reason_open))
+        reasons = "gogogo"
+        #reasons = "{}".format(', '.join(reason_open))
 #        print("roof open ok, {}".format(', '.join(reason_open)))
     else:
         open_ok = False
