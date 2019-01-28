@@ -130,11 +130,11 @@ int main(int argc, char *argv[])
 {
 	int i, g, wave_id, mode;
 	gpioPulse_t pulse[2];
-	int count[MAX_GPIOS];
-	int factor = 1;
+	double count[MAX_GPIOS];
+	double factor = 5.0;
 	char rrdupdate[99];
 	double sqm = 0.0;
-	int hz = 0;
+	double hz = 0;
 	char SQM_str[9];
 
 	/* get the gpios to monitor */
@@ -148,10 +148,10 @@ int main(int argc, char *argv[])
 	g_opt_s = 1;
 	g_opt_r = 10;
 
-//	printf("Monitoring gpios");
-	for (i=0; i<g_num_gpios; i++) printf("GPIO %d ", g_gpio[i]);
-	printf("Sample %d [us] Refresh %d [ds] ",
-		g_opt_s, g_opt_r); // sample and refresh rates in micro seconds, deci seconds
+	printf("SQM on ");
+	for (i=0; i<g_num_gpios; i++) printf("pin %d ", g_gpio[i]);
+//	printf("Sample %d [us] Refresh %d [ds] ",
+//		g_opt_s, g_opt_r); // sample and refresh rates in micro seconds, deci seconds
 
 	gpioCfgClock(g_opt_s, 1, 1);
 
@@ -194,11 +194,11 @@ int main(int argc, char *argv[])
 		g_reset_counts = 1;
 
 		hz = count[0];
-		sqm = 22.0 - 2.5*log10(hz) - 0.9; // 20.2 -> 19.3
-		printf("measured %d [Hz] -> -0.9 calibration = %.2f [mag/arcsec^2]\n",
+		sqm = 22.0 - 2.5*log10(hz) - 0.95;
+		printf("measured %.1f [Hz] -> %.2f [mag/arcsec^2] (= -0.95 calibration)\n",
 			   hz,
 			   sqm );
-		sprintf(rrdupdate, "update sqm.rrd -t frequency:sqm N:%d:%.2f\n",
+		sprintf(rrdupdate, "update sqm.rrd -t frequency:sqm N:%.1f:%.2f\n",
 				hz,
 				sqm);
 		rrdUpdateSomething("sqm", rrdupdate);
