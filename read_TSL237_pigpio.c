@@ -192,7 +192,7 @@ int main(int argc, char *argv[])
 
 		g_reset_counts = 1;
 
-		sqm = 22.0 - 2.5*log10(count[0]);
+		sqm = 22.0 - 2.5*log10(count[0]) - 0.9; // 20.2 -> 19.3
 		printf("%d Hz mag/arcsec^2=%.2f\n",
 			   count[0],
 			   sqm );
