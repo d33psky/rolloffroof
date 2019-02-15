@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 
-import sys
-import MySQLdb
 import datetime
 import json
-import requests
 from pathlib import Path
+import requests
+import MySQLdb
 
-database = MySQLdb.connect(
+db = MySQLdb.connect(
     host="lxc-rrd",
     port=3306,
     user='sens',
     passwd='sens',
     db="observatory1")
-db_cursor = database.cursor()
+db_cursor = db.cursor()
 
 def check_db(minutes):
     sql = """
@@ -123,26 +122,30 @@ def check_rain_past(drops_min, seconds, outlier_count_max):
         print("Rain drops > minimum {drops_min} count over the last {seconds} seconds is {count} > {outlier_count_max} -> close".format(drops_min=drops_min, seconds=seconds, count=count, outlier_count_max=outlier_count_max))
         return(False)
 
-def check_ups(sensors_id):
+def check_ups_is_on_mains(sensors_id, min_ups_bcharge):
     sql = """
-      SELECT ups1_status
+      SELECT ups1_status, ups1_bcharge
         FROM sensors
        WHERE sensors_id = {sensors_id}
        LIMIT 1;
     """.format(sensors_id=sensors_id)
     db_cursor.execute(sql)
     db_result_tuple = db_cursor.fetchone()
-    #print(db_result_tuple)
+#    print(db_result_tuple)
     try:
         ups_status  = db_result_tuple[0]
+        ups_bcharge = db_result_tuple[1]
     except:
         raise
-    if ups_status == 1:
-        print("UPS is powered -> open")
-        return(True)
+    if ups_status == 1 and ups_bcharge >= min_ups_bcharge:
+        print("UPS is powered and battery charge {bcharge} >= {min_ups_bcharge} -> open".format(bcharge=ups_bcharge, min_ups_bcharge=min_ups_bcharge))
+        return True
     else:
-        print("UPS is on battery -> close")
-        return(False)
+        if ups_status != 1:
+            print("UPS is on battery (and battery charge is {bcharge}) -> close".format(bcharge=ups_bcharge))
+        else:
+            print("UPS is powered but battery charge {bcharge} < {min_ups_bcharge} -> open".format(bcharge=ups_bcharge, min_ups_bcharge=min_ups_bcharge))
+        return False
 
 def check_infrared(sensors_id, sensor, minimum_delta_t):
     sql = """
@@ -261,10 +264,10 @@ INSERT INTO observatory1.roof ({keys})
     #print("{}".format(sql.lstrip().rstrip()))
     try:
         db_cursor.execute(sql)
-        database.commit()
+        db.commit()
         #print(db_cursor.rowcount, "record inserted.")
     except:
-        database.rollback()
+        db.rollback()
         raise
 
 #def get_roof_status(minutes):
@@ -307,10 +310,10 @@ INSERT INTO observatory1.events ({keys})
     #print("{}".format(sql.lstrip().rstrip()))
     try:
         db_cursor.execute(sql)
-        database.commit()
+        db.commit()
         #print(db_cursor.rowcount, "record inserted.")
     except:
-        database.rollback()
+        db.rollback()
         raise
 
 def sendToMattermost(url, message):
@@ -335,19 +338,19 @@ def main():
 #    roof_status      = get_roof_status(minutes=2)
 #    if roof_status == 1:
     last_open_ok     = retrieve_previous_open_ok()
-    if last_open_ok == True:
-        sqm_min_hysterese = -6
-        minimum_delta_t_hysterese = -7
+    if last_open_ok is True:
+        sqm_min_hysterese = 6
+        minimum_delta_t_hysterese = 7
     else:
         sqm_min_hysterese = 0
         minimum_delta_t_hysterese = 0
 
     sqm_now_ok       = check_sqm(sensors_id, sqm_min=17.5 - sqm_min_hysterese)
     rain_now_ok      = check_rain(sensors_id, drops_min=1)
-    ups_now_ok1      = check_ups(sensors_id)
-    if ups_now_ok1 == False:
+    ups_now_ok1      = check_ups_is_on_mains(sensors_id, 99.0)
+    if ups_now_ok1 is False:
         # might be self-test. check previous minute
-        ups_now_ok2  = check_ups(sensors_id - 1)
+        ups_now_ok2  = check_ups_is_on_mains(sensors_id - 1, 99.0)
 
     infrared1_now_ok = check_infrared(sensors_id, sensor='BAA1', minimum_delta_t=20 - minimum_delta_t_hysterese)
     infrared2_now_ok = check_infrared(sensors_id, sensor='BCC1', minimum_delta_t=20 - minimum_delta_t_hysterese)
@@ -420,28 +423,36 @@ def main():
 
     if sensors_id and sqm_now_ok and sqm_past_ok and rain_now_ok and rain_past_ok and ups_now_ok and (infrared1_now_ok or infrared2_now_ok) and (infrared1_past_ok or infrared2_past_ok) and closing_event_past_ok:
         open_ok = True
-        open_ok_str = "OK to open: "
         reasons = "All sensors are go"
         #reasons = "{}".format(', '.join(reason_open))
 #        print("roof open ok, {}".format(', '.join(reason_open)))
     else:
         open_ok = False
-        open_ok_str = "Must close: "
         reasons = "{}".format(', '.join(reason_close))
 #        print("roof open not ok: {}".format(', '.join(reason_close)))
 
-    print(reasons)
+#    print(reasons)
 
     utcnow = datetime.datetime.utcnow()
 #    last_open_ok = retrieve_previous_open_ok()
     event = ''
-    if last_open_ok == False:
-        if open_ok == True:
+    roof_change = False
+    if last_open_ok is False:
+        if open_ok is True:
+            roof_change = True
             event = "opening"
+        else:
+            event = "stays closed"
     else:
-        if open_ok == False:
+        if open_ok is False:
+            roof_change = True
             event = "closing"
-    if len(event) > 0:
+        else:
+            event = "stays open"
+
+    print("Roof {}, {}".format(event, reasons))
+
+    if roof_change is True:
         sendToMattermost(url, event + ", " + reasons)
         store_event(utcnow, event, reasons)
 
