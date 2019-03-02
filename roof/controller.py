@@ -8,7 +8,8 @@ from flask import Flask, jsonify #, makeresponse
 
 next_possible_green_button_action = 0
 GREEN_BUTTON_OPENING = 1
-GREEN_BUTTON_CLOSING = 2
+GREEN_BUTTON_STOP = 2
+GREEN_BUTTON_CLOSING = 3
 
 received_signal = 0
 roof_opening = False
@@ -149,6 +150,7 @@ def wait_for_button(pin):
     global roof_opening
     global roof_closing
     global next_possible_green_button_action
+    time.sleep(1)
     while True:
         while wiringpi.digitalRead(pin) == True and received_signal == 0:
             time.sleep(0.01)
@@ -169,6 +171,9 @@ def wait_for_button(pin):
                 roof_closing = True
             elif next_possible_green_button_action == GREEN_BUTTON_OPENING:
                 roof_opening = True
+            elif next_possible_green_button_action == GREEN_BUTTON_STOP:
+                roof_closing = False
+                roof_opening = False
             return True
         else:
             print("Too brief press:", pressed_time, "ms")
@@ -180,19 +185,24 @@ class RoofControlThread(threading.Thread):
         global received_signal
         global next_possible_green_button_action
         while True:
-            print("\n",time.strftime("%Y%m%d_%H%M%S"), "Wait for button or signal event")
+            print('')
+            print(time.strftime("%Y%m%d_%H%M%S"), "Wait for button or signal event")
             wait_for_button(GREEN_BUTTON)
             print(time.strftime("%Y%m%d_%H%M%S"), "Green button pressed or signal received")
+            time.sleep(0.5)
             if roof_closing:
                 if not read_roof_sensor_close():
                     print(time.strftime("%Y%m%d_%H%M%S"), "Closing roof")
                     write_roof_motor_close()
-                    next_possible_green_button_action = GREEN_BUTTON_OPENING
-                    print("\n",time.strftime("%Y%m%d_%H%M%S"), "Wait for an event")
+                    next_possible_green_button_action = GREEN_BUTTON_STOP
+                    print('')
+                    print(time.strftime("%Y%m%d_%H%M%S"), "Wait for an event to stop closing the roof")
                     while not read_roof_sensor_close() and wiringpi.digitalRead(GREEN_BUTTON) and received_signal == 0:
                         pass
+                    print(time.strftime("%Y%m%d_%H%M%S"), "event to stop closing the roof received")
                     received_signal = 0
                     write_roof_motor_stop()
+                    next_possible_green_button_action = GREEN_BUTTON_OPENING
                     if read_roof_sensor_close():
                         print(time.strftime("%Y%m%d_%H%M%S"), "Roof is closed")
                 else:
@@ -201,12 +211,15 @@ class RoofControlThread(threading.Thread):
                 if not read_roof_sensor_open():
                     print(time.strftime("%Y%m%d_%H%M%S"), "Opening roof")
                     write_roof_motor_open()
-                    next_possible_green_button_action = GREEN_BUTTON_CLOSING
-                    print("\n",time.strftime("%Y%m%d_%H%M%S"), "Wait for an event")
+                    next_possible_green_button_action = GREEN_BUTTON_STOP
+                    print('')
+                    print(time.strftime("%Y%m%d_%H%M%S"), "Wait for an event to stop opening the roof")
                     while not read_roof_sensor_open() and wiringpi.digitalRead(GREEN_BUTTON) and received_signal == 0:
                         pass
+                    print(time.strftime("%Y%m%d_%H%M%S"), "event to stop opening the roof received")
                     received_signal = 0
                     write_roof_motor_stop()
+                    next_possible_green_button_action = GREEN_BUTTON_CLOSING
                     if read_roof_sensor_open():
                         print(time.strftime("%Y%m%d_%H%M%S"), "Roof is open")
                 else:
