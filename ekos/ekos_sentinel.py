@@ -46,10 +46,20 @@ class BasicIndi():
         self.logger = logging.getLogger('ekos_sentinel')
 
     def _run(self, cmd, timeout):
-        ws = subprocess.run(shlex.split(cmd),
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            universal_newlines=True, timeout=timeout, check=True
-                            )
+        try:
+            ws = subprocess.run(shlex.split(cmd),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                universal_newlines=True, timeout=timeout, check=True
+                                )
+        except subprocess.CalledProcessError as cpe:
+            self.logger.critical(
+                "Command [{}] exited with value [{}] stdout [{}] stderr [{}]".format(cmd, cpe.returncode,
+                                                                                     cpe.stdout.rstrip(),
+                                                                                     cpe.stderr.rstrip()))
+            return None
+        except subprocess.TimeoutExpired:
+            self.logger.critical("Command [{}] timed out after {} seconds".format(cmd, timeout))
+            return None
         return ws
 
     def get_weather_safety(self, weather_meta_station_indexes, indi_command_send_timeout):
@@ -58,6 +68,9 @@ class BasicIndi():
             cmd = "indi_getprop -h {host} -1 '{property}_{station}'".format(
                 host=self.host, property=INDI_WEATHER_PROPERTY, station=station)
             ws = self._run(cmd, indi_command_send_timeout)
+            if not ws:
+                self.logger.critical("get_weather_safety failed")
+                return False
             self.logger.debug("{} {} {}".format(__class__, cmd, ws.stdout.rstrip()))
             if ws.stdout.rstrip() == INDI_WEATHER_PROPERTY_OK_SETTING:
                 safe += 1
@@ -69,6 +82,9 @@ class BasicIndi():
     def get_roof_safety(self, indi_command_send_timeout):
         cmd = "indi_getprop -h {host} -1 '{property}'".format(host=self.host, property=INDI_DOME_PARK_PROPERTY)
         ws = self._run(cmd, indi_command_send_timeout)
+        if not ws:
+            self.logger.critical("get_roof_safety failed")
+            return False
         self.logger.debug("{} {} {}".format(__class__, cmd, ws.stdout.rstrip()))
         if ws.stdout.rstrip() == INDI_DOME_PARK_PROPERTY_PARK_SETTING:
             return True
@@ -78,6 +94,9 @@ class BasicIndi():
     def get_mount_safety(self, timeout):
         cmd = "indi_getprop -h {host} -1 '{property}'".format(host=self.host, property=INDI_MOUNT_PARK_PROPERTY)
         ws = self._run(cmd, timeout)
+        if not ws:
+            self.logger.critical("get_mount_safety failed")
+            return False
         self.logger.debug("{} {} {}".format(__class__, cmd, ws.stdout.rstrip()))
         if ws.stdout.rstrip() == INDI_MOUNT_PARK_PROPERTY_PARK_SETTING:
             return True
@@ -88,6 +107,9 @@ class BasicIndi():
         cmd = "indi_setprop -h {host} '{property}={setting}'".format(host=self.host, property=INDI_MOUNT_PARK_PROPERTY,
                                                                      setting=INDI_MOUNT_PARK_PROPERTY_PARK_SETTING)
         ws = self._run(cmd, indi_command_send_timeout)
+        if not ws:
+            self.logger.critical("park_mount failed")
+            return False
         self.logger.debug("{} {} {}".format(__class__, cmd, ws.stdout.rstrip()))
         if ws.returncode != 0:
             return False
@@ -103,6 +125,9 @@ class BasicIndi():
         cmd = "indi_setprop -h {host} '{property}={setting}'".format(host=self.host, property=INDI_DOME_PARK_PROPERTY,
                                                                      setting=INDI_DOME_PARK_PROPERTY_PARK_SETTING)
         ws = self._run(cmd, indi_command_send_timeout)
+        if not ws:
+            self.logger.critical("close_roof failed")
+            return False
         self.logger.debug("{} {} {}".format(__class__, cmd, ws.stdout.rstrip()))
         if ws.returncode != 0:
             return False
@@ -119,13 +144,16 @@ class BasicIndi():
                                                                      property=INDI_CAMERA_COOLER_PROPERTY,
                                                                      setting=INDI_CAMERA_COOLER_PROPERTY_OFF_SETTING)
         ws = self._run(cmd, indi_command_send_timeout)
+        if not ws:
+            self.logger.critical("warm_camera failed")
+            return False
         self.logger.debug("{} {} {}".format(__class__, cmd, ws.stdout.rstrip()))
         return ws.returncode == 0
 
 
 def alert_and_abort(reason):
     logger = logging.getLogger('ekos_sentinel')
-    logger.critical(reason)
+    logger.critical("TODO wake human stating {}".format(reason))
     sys.exit(1)
 
 
