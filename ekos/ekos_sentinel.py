@@ -37,10 +37,10 @@ INDI_MOUNT_TRACK_STATE_PROPERTY = 'Off'
 INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC = '10micron.EQUATORIAL_EOD_COORD.DEC'
 INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC_PROPERTY = '39'
 INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC_MAX_OFFSET = '1'
-INDI_CAMERA_COOLER_PROPERTY = 'ZWO CCD ASI1600MM-Cool.CCD_COOLER_POWER.CCD_COOLER_VALUE'
-INDI_CAMERA_COOLER_PROPERTY_OFF_SETTING = '0'
+INDI_CAMERA_COOLER = 'ASI1600MM-Cool.CCD_COOLER.COOLER_ON'
+INDI_CAMERA_COOLER_PROPERTY = 'Off'
 MAIN_LOOP_SLEEP_SECONDS = 60
-INDI_COMMAND_SEND_TIMEOUT = 5
+INDI_COMMAND_TIMEOUT = 5
 MOUNT_PARK_TIMEOUT = 60
 ROOF_CLOSE_TIMEOUT = 60
 
@@ -67,12 +67,12 @@ class BasicIndi():
             return None
         return ws
 
-    def get_weather_safety(self, weather_meta_station_indexes, indi_command_send_timeout):
+    def get_weather_safety(self, weather_meta_station_indexes, indi_command_timeout):
         safe = 0
         for station in weather_meta_station_indexes:
             cmd = "indi_getprop -h {host} -1 '{property}_{station}'".format(
                 host=self.host, property=INDI_WEATHER_PROPERTY, station=station)
-            ws = self._run(cmd, indi_command_send_timeout)
+            ws = self._run(cmd, indi_command_timeout)
             if not ws:
                 self.logger.critical("get_weather_safety failed")
                 return False
@@ -84,9 +84,9 @@ class BasicIndi():
         else:
             return False
 
-    def get_roof_safety(self, indi_command_send_timeout):
+    def get_roof_safety(self, indi_command_timeout):
         cmd = "indi_getprop -h {host} -1 '{property}'".format(host=self.host, property=INDI_DOME_PARK_PROPERTY)
-        ws = self._run(cmd, indi_command_send_timeout)
+        ws = self._run(cmd, indi_command_timeout)
         if not ws:
             self.logger.critical("get_roof_safety failed")
             return False
@@ -96,11 +96,11 @@ class BasicIndi():
         else:
             return False
 
-    def get_mount_safety(self, timeout, debug = False):
+    def get_mount_safety(self, indi_command_timeout):
         # multiple steps
         # 1) INDI_MOUNT_PARK_PROPERTY must be INDI_MOUNT_PARK_PROPERTY_PARK_SETTING
         cmd = "indi_getprop -h {host} -1 '{property}'".format(host=self.host, property=INDI_MOUNT_PARK_PROPERTY)
-        ws = self._run(cmd, timeout)
+        ws = self._run(cmd, indi_command_timeout)
         if not ws:
             self.logger.critical("get_mount_safety failed at step 1")
             return False
@@ -109,28 +109,31 @@ class BasicIndi():
             return False
         # 2) INDI_MOUNT_TRACK_STATE must be INDI_MOUNT_TRACK_STATE_PROPERTY
         cmd = "indi_getprop -h {host} -1 '{property}'".format(host=self.host, property=INDI_MOUNT_TRACK_STATE)
-        ws = self._run(cmd, timeout)
+        ws = self._run(cmd, indi_command_timeout)
         if not ws:
             self.logger.critical("get_mount_safety failed at step 2")
             return False
         self.logger.debug("{} {} {}".format(__class__, cmd, ws.stdout.rstrip()))
         if ws.stdout.rstrip() != INDI_MOUNT_TRACK_STATE_PROPERTY:
             return False
-        # 3) INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC needs to be within INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC_MAX_OFFSET to INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC_PROPERTY (park position)
-        cmd = "indi_getprop -h {host} -1 '{property}'".format(host=self.host, property=INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC)
-        ws = self._run(cmd, timeout)
+        # 3) INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC needs to be within INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC_MAX_OFFSET
+        #    to INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC_PROPERTY (park position)
+        cmd = "indi_getprop -h {host} -1 '{property}'".format(host=self.host,
+                                                              property=INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC)
+        ws = self._run(cmd, indi_command_timeout)
         if not ws:
             self.logger.critical("get_mount_safety failed at step 3")
             return False
         self.logger.debug("{} {} {}".format(__class__, cmd, ws.stdout.rstrip()))
-        if abs(float(ws.stdout.rstrip())) - abs(float(INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC_PROPERTY)) > float(INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC_MAX_OFFSET):
+        if abs(float(ws.stdout.rstrip())) - abs(float(INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC_PROPERTY)) > float(
+                INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC_MAX_OFFSET):
             return False
         return True
 
-    def park_mount(self, indi_command_send_timeout, mount_park_timeout):
+    def park_mount(self, indi_command_timeout, mount_park_timeout):
         cmd = "indi_setprop -h {host} '{property}={setting}'".format(host=self.host, property=INDI_MOUNT_PARK_PROPERTY,
                                                                      setting=INDI_MOUNT_PARK_PROPERTY_PARK_SETTING)
-        ws = self._run(cmd, indi_command_send_timeout)
+        ws = self._run(cmd, indi_command_timeout)
         if not ws:
             self.logger.critical("park_mount failed")
             return False
@@ -140,15 +143,15 @@ class BasicIndi():
         mount_parked = False
         mount_park_time = 0
         while not mount_parked and mount_park_time < mount_park_timeout:
-            mount_parked = self.get_mount_safety(indi_command_send_timeout)
+            mount_parked = self.get_mount_safety(indi_command_timeout)
             time.sleep(1)
             mount_park_time += 1
         return mount_parked
 
-    def close_roof(self, indi_command_send_timeout, roof_close_timeout):
+    def close_roof(self, indi_command_timeout, roof_close_timeout):
         cmd = "indi_setprop -h {host} '{property}={setting}'".format(host=self.host, property=INDI_DOME_PARK_PROPERTY,
                                                                      setting=INDI_DOME_PARK_PROPERTY_PARK_SETTING)
-        ws = self._run(cmd, indi_command_send_timeout)
+        ws = self._run(cmd, indi_command_timeout)
         if not ws:
             self.logger.critical("close_roof failed")
             return False
@@ -158,16 +161,16 @@ class BasicIndi():
         roof_closed = False
         roof_close_time = 0
         while not roof_closed and roof_close_time < roof_close_timeout:
-            roof_closed = self.get_roof_safety(indi_command_send_timeout=indi_command_send_timeout)
+            roof_closed = self.get_roof_safety(indi_command_timeout=indi_command_timeout)
             time.sleep(1)
             roof_close_time += 1
         return roof_closed
 
-    def warm_camera(self, indi_command_send_timeout):
+    def warm_camera(self, indi_command_timeout):
         cmd = "indi_setprop -h {host} '{property}={setting}'".format(host=self.host,
-                                                                     property=INDI_CAMERA_COOLER_PROPERTY,
-                                                                     setting=INDI_CAMERA_COOLER_PROPERTY_OFF_SETTING)
-        ws = self._run(cmd, indi_command_send_timeout)
+                                                                     property=INDI_CAMERA_COOLER,
+                                                                     setting=INDI_CAMERA_COOLER_PROPERTY)
+        ws = self._run(cmd, indi_command_timeout)
         if not ws:
             self.logger.critical("warm_camera failed")
             return False
@@ -186,6 +189,7 @@ def main():
     parser.add_argument('--debug', action='store_true', help='enable debug level verbosity')
     parser.add_argument('--once', action='store_true', help='run only once, useful for debugging')
     parser.add_argument('--indi_host', required=True, type=str, help='INDI server address')
+    parser.add_argument('--get_roof_safety', action='store_true', help='for testing: only call get_roof_safety')
     parser.add_argument('--get_mount_safety', action='store_true', help='for testing: only call get_mount_safety')
     args = parser.parse_args()
 
@@ -205,7 +209,13 @@ def main():
     basic_indi = BasicIndi(host=args.indi_host)
 
     if args.get_mount_safety:
-        logger.info("get_mount_safety = [{}]".format(basic_indi.get_mount_safety(timeout=60, debug=True)))
+        logger.info(
+            "get_mount_safety = [{}]".format(basic_indi.get_mount_safety(indi_command_timeout=INDI_COMMAND_TIMEOUT)))
+        quit(0)
+
+    if args.get_roof_safety:
+        logger.info(
+            "get_roof_safety = [{}]".format(basic_indi.get_roof_safety(indi_command_timeout=INDI_COMMAND_TIMEOUT)))
         quit(0)
 
     looping = True
@@ -213,8 +223,8 @@ def main():
         if args.once:
             looping = False
         weather_safety_status = basic_indi.get_weather_safety(weather_meta_station_indexes=WEATHER_META_STATION_INDEXES,
-                                                              indi_command_send_timeout=INDI_COMMAND_SEND_TIMEOUT)
-        roof_safety_status = basic_indi.get_roof_safety(indi_command_send_timeout=INDI_COMMAND_SEND_TIMEOUT)
+                                                              indi_command_timeout=INDI_COMMAND_TIMEOUT)
+        roof_safety_status = basic_indi.get_roof_safety(indi_command_timeout=INDI_COMMAND_TIMEOUT)
         if weather_safety_status:
             if roof_safety_status:
                 logger.info('weather is safe, roof is closed, start ekos scheduler')
@@ -231,19 +241,19 @@ def main():
                 # furthermore stopping the scheduler does not park or close anything, so that is done here :
 
                 logger.warning('park mount')
-                success = basic_indi.park_mount(indi_command_send_timeout=INDI_COMMAND_SEND_TIMEOUT,
+                success = basic_indi.park_mount(indi_command_timeout=INDI_COMMAND_TIMEOUT,
                                                 mount_park_timeout=MOUNT_PARK_TIMEOUT)
                 if not success:
                     alert_and_abort('Failed to park the mount')
 
                 logger.warning('close roof')
-                success = basic_indi.close_roof(indi_command_send_timeout=INDI_COMMAND_SEND_TIMEOUT,
+                success = basic_indi.close_roof(indi_command_timeout=INDI_COMMAND_TIMEOUT,
                                                 roof_close_timeout=ROOF_CLOSE_TIMEOUT)
                 if not success:
                     alert_and_abort('Failed to close the roof')
 
                 logger.warning('warm camera')
-                success = basic_indi.warm_camera(indi_command_send_timeout=INDI_COMMAND_SEND_TIMEOUT)
+                success = basic_indi.warm_camera(indi_command_timeout=INDI_COMMAND_TIMEOUT)
                 if not success:
                     logger.warning('failed to warm the camera, this is not critical to safety so just continue')
         if looping:
