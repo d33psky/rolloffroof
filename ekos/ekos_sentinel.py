@@ -158,7 +158,7 @@ def alert_and_abort(reason):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Ekos cli')
+    parser = argparse.ArgumentParser(description='Ekos Sentinel')
     parser.add_argument('--debug', action='store_true', help='enable debug level verbosity')
     parser.add_argument('--once', action='store_true', help='run only once, useful for debugging')
     parser.add_argument('--indi_host', required=True, type=str, help='INDI server address')
@@ -199,7 +199,7 @@ def main():
                 logger.warning('weather is unsafe, roof is open, stop ekos scheduler')
                 ekos_dbus.stop_scheduler()
                 # there's no way to tell yet if stopping the ekos scheduler succeeded or not
-                # furthermore stopping the scheduler does not park of close anything
+                # furthermore stopping the scheduler does not park or close anything, so that is done here :
 
                 logger.warning('park mount')
                 success = basic_indi.park_mount(indi_command_send_timeout=INDI_COMMAND_SEND_TIMEOUT,
