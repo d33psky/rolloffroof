@@ -32,6 +32,11 @@ INDI_WEATHER_PROPERTY_OK_SETTING = 'Ok'
 WEATHER_META_STATION_INDEXES = {1, 2}
 INDI_MOUNT_PARK_PROPERTY = '10micron.TELESCOPE_PARK.PARK'
 INDI_MOUNT_PARK_PROPERTY_PARK_SETTING = 'On'
+INDI_MOUNT_TRACK_STATE = '10micron.TELESCOPE_TRACK_STATE.TRACK_ON'
+INDI_MOUNT_TRACK_STATE_PROPERTY = 'Off'
+INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC = '10micron.EQUATORIAL_EOD_COORD.DEC'
+INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC_PROPERTY = '39'
+INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC_MAX_OFFSET = '1'
 INDI_CAMERA_COOLER_PROPERTY = 'ZWO CCD ASI1600MM-Cool.CCD_COOLER_POWER.CCD_COOLER_VALUE'
 INDI_CAMERA_COOLER_PROPERTY_OFF_SETTING = '0'
 MAIN_LOOP_SLEEP_SECONDS = 60
@@ -91,17 +96,36 @@ class BasicIndi():
         else:
             return False
 
-    def get_mount_safety(self, timeout):
+    def get_mount_safety(self, timeout, debug = False):
+        # multiple steps
+        # 1) INDI_MOUNT_PARK_PROPERTY must be INDI_MOUNT_PARK_PROPERTY_PARK_SETTING
         cmd = "indi_getprop -h {host} -1 '{property}'".format(host=self.host, property=INDI_MOUNT_PARK_PROPERTY)
         ws = self._run(cmd, timeout)
         if not ws:
-            self.logger.critical("get_mount_safety failed")
+            self.logger.critical("get_mount_safety failed at step 1")
             return False
         self.logger.debug("{} {} {}".format(__class__, cmd, ws.stdout.rstrip()))
-        if ws.stdout.rstrip() == INDI_MOUNT_PARK_PROPERTY_PARK_SETTING:
-            return True
-        else:
+        if ws.stdout.rstrip() != INDI_MOUNT_PARK_PROPERTY_PARK_SETTING:
             return False
+        # 2) INDI_MOUNT_TRACK_STATE must be INDI_MOUNT_TRACK_STATE_PROPERTY
+        cmd = "indi_getprop -h {host} -1 '{property}'".format(host=self.host, property=INDI_MOUNT_TRACK_STATE)
+        ws = self._run(cmd, timeout)
+        if not ws:
+            self.logger.critical("get_mount_safety failed at step 2")
+            return False
+        self.logger.debug("{} {} {}".format(__class__, cmd, ws.stdout.rstrip()))
+        if ws.stdout.rstrip() != INDI_MOUNT_TRACK_STATE_PROPERTY:
+            return False
+        # 3) INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC needs to be within INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC_MAX_OFFSET to INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC_PROPERTY (park position)
+        cmd = "indi_getprop -h {host} -1 '{property}'".format(host=self.host, property=INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC)
+        ws = self._run(cmd, timeout)
+        if not ws:
+            self.logger.critical("get_mount_safety failed at step 3")
+            return False
+        self.logger.debug("{} {} {}".format(__class__, cmd, ws.stdout.rstrip()))
+        if abs(float(ws.stdout.rstrip())) - abs(float(INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC_PROPERTY)) > float(INDI_MOUNT_EQUATORIAL_EOD_COORD_DEC_MAX_OFFSET):
+            return False
+        return True
 
     def park_mount(self, indi_command_send_timeout, mount_park_timeout):
         cmd = "indi_setprop -h {host} '{property}={setting}'".format(host=self.host, property=INDI_MOUNT_PARK_PROPERTY,
@@ -162,6 +186,7 @@ def main():
     parser.add_argument('--debug', action='store_true', help='enable debug level verbosity')
     parser.add_argument('--once', action='store_true', help='run only once, useful for debugging')
     parser.add_argument('--indi_host', required=True, type=str, help='INDI server address')
+    parser.add_argument('--get_mount_safety', action='store_true', help='for testing: only call get_mount_safety')
     args = parser.parse_args()
 
     logger = logging.getLogger('ekos_sentinel')
@@ -178,6 +203,10 @@ def main():
 
     ekos_dbus = EkosDbus()
     basic_indi = BasicIndi(host=args.indi_host)
+
+    if args.get_mount_safety:
+        logger.info("get_mount_safety = [{}]".format(basic_indi.get_mount_safety(timeout=60, debug=True)))
+        quit(0)
 
     looping = True
     while looping:
