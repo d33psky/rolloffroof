@@ -2,7 +2,7 @@
 
 set -e
 
-cd /mnt/nas/tmp/
+cd /mnt/live/rpi3tmp/
 
 TARGETPERIOD=60
 AVERAGEVALUE=0
@@ -59,7 +59,8 @@ while :; do
 	if [[ $OLDSHUTTERSPEED -eq 6000000 && $AVERAGEVALUE -lt 20 ]]; then
 		T=$(date '+%Y%m%d_%H%M%S')
 		echo "$T count stars"
-		S=$(cat /mnt/live/allsky_temp2.jpg|jpegtopnm 2>/dev/null|ppmtopgm|convert -crop 1000x1000+796+472 - - |convert - crop.fits && image2xy -O -g 9 crop-0.fits|awk '{ print $3 }')
+#S=$(cat /mnt/live/allsky_temp2.jpg|jpegtopnm 2>/dev/null|ppmtopgm|convert -crop 1000x1000+796+472 - - |convert - crop.fits && image2xy -O -g 9 crop-0.fits|awk '{ print $3 }')
+		S=$(cat /mnt/live/allsky_temp2.jpg|jpegtopnm 2>/dev/null|ppmtopgm|convert -crop 1000x1000+796+472 - - |convert - crop.fits && image2xy -O -g 9 crop.fits|awk '{ print $3 }')
 		echo "stars=[$S]"
 	else
 		echo "$T it is too bright, do not bother counting stars"
