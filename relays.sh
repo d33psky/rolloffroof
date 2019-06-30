@@ -21,10 +21,10 @@ for arg in $@; do
 done
 
 readStates() {
-	imaging_computer_power=$(cat /dev/shm/state_relay3)
-	imaging_equipment_power=$(cat /dev/shm/state_relay4)
-	mount_power=$(cat /dev/shm/state_relay6)
-	roof_motor_power=$(cat /dev/shm/state_relay7)
+	imaging_computer_power=$(cat /dev/shm/state_relay3 || echo "low")
+	imaging_equipment_power=$(cat /dev/shm/state_relay4 || echo "low")
+	mount_power=$(cat /dev/shm/state_relay6 || echo "low")
+	roof_motor_power=$(cat /dev/shm/state_relay7 || echo "low")
 	echo "$1 relay state: lap=$imaging_computer_power mount=$mount_power roof=$roof_motor_power rest=$imaging_equipment_power"
 }
 
@@ -55,17 +55,17 @@ if [[ ${TASKS['lap']} -eq 1 ]]; then
 	if [[ $imaging_computer_power == $ACTION_IF ]]; then
 		echo "$ACTION_STR lap now:"
 		if [[ ${TASKS['wake']} -eq 1 ]]; then
-			/root/relay_0-7_low-high.py 3 $ACTION_RELAY
-			echo "sleep 5"
-			sleep 5
-			echo "Send etherwake"
-			etherwake 00:1c:23:53:ca:cc
+			./relay_0-7_low-high.py 3 $ACTION_RELAY
+#			echo "sleep 5"
+#			sleep 5
+#			echo "Send etherwake"
+#			etherwake 00:1c:23:53:ca:cc
 		else
-			echo "ssh lap2 poweroff"
-			ssh lap2 poweroff ||:
-			echo "sleep 60"
-			sleep 60
-			/root/relay_0-7_low-high.py 3 $ACTION_RELAY
+#			echo "ssh lap2 poweroff"
+#			ssh lap2 poweroff ||:
+#			echo "sleep 60"
+#			sleep 60
+			./relay_0-7_low-high.py 3 $ACTION_RELAY
 		fi
 	else
 		echo "Skip $ACTION_STR lap, it's already $ACTION_ALREADY"
@@ -75,7 +75,7 @@ fi
 if [[ ${TASKS['mount']} -eq 1 ]]; then
 	if [[ $mount_power == $ACTION_IF ]]; then
 		echo "$ACTION_STR mount now:"
-		/root/relay_0-7_low-high.py 6 $ACTION_RELAY
+		./relay_0-7_low-high.py 6 $ACTION_RELAY
 	else
 		echo "Skip $ACTION_STR mount, it's already $ACTION_ALREADY"
 	fi
@@ -84,7 +84,7 @@ fi
 if [[ ${TASKS['rest']} -eq 1 ]]; then
 	if [[ $imaging_equipment_power == $ACTION_IF ]]; then
 		echo "$ACTION_STR rest now:"
-		/root/relay_0-7_low-high.py 4 $ACTION_RELAY
+		./relay_0-7_low-high.py 4 $ACTION_RELAY
 	else
 		echo "Skip $ACTION_STR rest, it's already $ACTION_ALREADY"
 	fi
@@ -93,7 +93,7 @@ fi
 if [[ ${TASKS['roof']} -eq 1 ]]; then
 	if [[ $roof_motor_power == $ACTION_IF ]]; then
 		echo "$ACTION_STR roof motor now:"
-		/root/relay_0-7_low-high.py 7 $ACTION_RELAY
+		./relay_0-7_low-high.py 7 $ACTION_RELAY
 	else
 		echo "Skip $ACTION_STR roof motor, it's already $ACTION_ALREADY"
 	fi

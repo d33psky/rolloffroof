@@ -4,7 +4,7 @@ use POSIX qw(strftime);
 use strict;
  
 # Remote RRD server and port
-my $rrd_server = "192.168.100.43";
+my $rrd_server = "192.168.100.81";
 my $port = 7777;
  
 sub sendToRRD ($) {
@@ -89,7 +89,7 @@ sub readUPS {
 			$linev = $1;
 			next;
 		}
-		if (m/^LOADPCT\s+:\s+([\d\.]+)\s+Percent Load Capacity$/) {
+		if (m/^LOADPCT\s+:\s+([\d\.]+)\s+Percent.*$/) {
 			$loadpct = $1;
 			next;
 		}
@@ -101,7 +101,7 @@ sub readUPS {
 			$timeleft = $1;
 			next;
 		}
-		if (m/^ITEMP\s+:\s+([\d\.]+)\s+C Internal$/) {
+		if (m/^ITEMP\s+:\s+([\d\.]+)\s+C.*$/) {
 			$itemp = $1;
 			next;
 		}

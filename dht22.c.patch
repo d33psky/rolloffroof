@@ -1,0 +1,28 @@
+diff --git a/dht22.c b/dht22.c
+index c4e539d..f5374df 100644
+--- a/dht22.c
++++ b/dht22.c
+@@ -88,12 +88,12 @@ static int read_dht22_dat()
+         if ((dht22_dat[2] & 0x80) != 0)  t *= -1;
+ 
+ 
+-    printf("Humidity = %.2f %% Temperature = %.2f *C \n", h, t );
++    printf("pin %d Humidity = %.2f %% Temperature = %.2f *C \n", DHTPIN, h, t );
+     return 1;
+   }
+   else
+   {
+-    printf("Data not good, skip\n");
++//    printf("Data not good, skip\n");
+     return 0;
+   }
+ }
+@@ -108,7 +108,7 @@ int main (int argc, char *argv[])
+     DHTPIN = atoi(argv[1]);
+    
+ 
+-  printf ("Raspberry Pi wiringPi DHT22 reader\nwww.lolware.net\n") ;
++//  printf ("Raspberry Pi wiringPi DHT22 reader\nwww.lolware.net\n") ;
+ 
+   lockfd = open_lockfile(LOCKFILE);
+ 

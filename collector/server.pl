@@ -1,4 +1,7 @@
 #!/usr/bin/perl
+
+# http://xmodulo.com/how-to-write-simple-tcp-server-and-client-in-perl.html
+
 use IO::Socket::INET;
  
 # auto-flush on socket
@@ -30,6 +33,7 @@ while(1) {
 	chomp($data);
 	if ($data =~ m/^update/i) {
 		print "$data\n";
+		system ("./sensors_to_database.py $data");
 		system ("/usr/bin/rrdtool $data");
 	} else {
 		print "received UNKNOWN data: [$data]\n";
