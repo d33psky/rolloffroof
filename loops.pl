@@ -137,8 +137,10 @@ while (1) {
 
 	printf( strftime("%Y%m%d_%H%M%S", localtime) ." getting data:\n");
 
-	printf(strftime("%Y%m%d_%H%M%S", localtime) ." read tempandhum-outside pin 15:\n");
-	readTempAndHumidity("tempandhum-outside", "15", "0.0", "0.0");
+# b0rken sensor :(
+#	printf(strftime("%Y%m%d_%H%M%S", localtime) ." read tempandhum-outside pin 15:\n");
+#	readTempAndHumidity("tempandhum-outside", "15", "0.0", "0.0");
+
 	printf(strftime("%Y%m%d_%H%M%S", localtime) ." read tempandhum-observatory pin 16:\n");
 	readTempAndHumidity("tempandhum-observatory", "16", "0.0", "14.0");
 	printf(strftime("%Y%m%d_%H%M%S", localtime) ." read_TSL237_pigpio :\n");
