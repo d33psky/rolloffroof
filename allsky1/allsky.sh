@@ -1,4 +1,5 @@
 #!/bin/bash
+# rpi3 allsky
 
 set -e
 
@@ -35,6 +36,7 @@ while :; do
 
 	T=$(date '+%Y%m%d_%H%M%S')
 	echo "$T Calculate average"
+    # ImageMagick pixel enumeration: 1,1,255,srgb
 	AVERAGERGB=$(cat /mnt/live/allsky_temp2.jpg|convert -crop 1000x1000+796+472 - - |convert -resize 1x1 - txt: |tail -1|sed -e's/0,0: (//' -e's/,/ /g'|awk '{ printf "%.0f %.0f %.0f\n", $1,$2,$3 }')
 	RED=$(  echo $AVERAGERGB|cut -d' ' -f 1)
 	GREEN=$(echo $AVERAGERGB|cut -d' ' -f 2)
