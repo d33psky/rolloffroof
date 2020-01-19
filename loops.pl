@@ -33,7 +33,7 @@ sub readTempAndHumidity {
 		$temperature = sprintf("%0.2f", $2 + $f1);
 		$humidity = sprintf("%0.2f", $1 + $f2);
 	};
-	my $gamma = ( (17.27 * $temperature) / (237.7 + $temperature) ) + log ($humidity / 100);
+	my $gamma = ( (17.27 * $temperature) / (237.7 + $temperature) ) + log (($humidity + 0.001)/ 100);
 	my $dewpoint = sprintf("%0.2f", (237.7 * $gamma) / (17.27 - $gamma));
 	my $message = "update $rrdname.rrd -t temperature:humidity:dewpoint N:$temperature:$humidity:$dewpoint";
 
@@ -137,12 +137,18 @@ while (1) {
 
 	printf( strftime("%Y%m%d_%H%M%S", localtime) ." getting data:\n");
 
+	printf(strftime("%Y%m%d_%H%M%S", localtime) ." read tempandhum-outside pin 15:\n");
 	readTempAndHumidity("tempandhum-outside", "15", "0.0", "0.0");
+	printf(strftime("%Y%m%d_%H%M%S", localtime) ." read tempandhum-observatory pin 16:\n");
 	readTempAndHumidity("tempandhum-observatory", "16", "0.0", "14.0");
+	printf(strftime("%Y%m%d_%H%M%S", localtime) ." read_TSL237_pigpio :\n");
 	system("./read_TSL237_pigpio") == 0 or die "read_TSL237_pigpio failed!";
+	printf(strftime("%Y%m%d_%H%M%S", localtime) ." readAllMyI2cDevices :\n");
 	system("./readAllMyI2cDevices") == 0 or die "readAllMyI2cDevices failed!";
+	printf(strftime("%Y%m%d_%H%M%S", localtime) ." read ups :\n");
 	readUPS("ups");
 
+	printf(strftime("%Y%m%d_%H%M%S", localtime) ." Done reading, send rrds:\n");
 	while ( </dev/shm/rrdupdate*> ) {
 		my $file = $_;
 		open my $fh, '<', $file or die "can't open $file: $!";
