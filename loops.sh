@@ -1,14 +1,14 @@
 #!/bin/bash
 
-cd ~/rolloffroof/
+LOOPWHAT=$1
 
 while :; do
 	T=$(date '+%Y%m%d_%H%M%S')
-    echo "$T start loops.pl"
-    rc=0; ./loops.pl || rc=$?
+    echo "$T start $LOOPWHAT"
+    rc=0; $LOOPWHAT || rc=$?
 
 	T=$(date '+%Y%m%d_%H%M%S')
-    echo "$T loops.pl exited with $rc"
+    echo "$T $LOOPWHAT exited with $rc"
 
     MOUNTED=0
     while [[ $MOUNTED -ne 1 ]]; do
