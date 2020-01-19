@@ -1,8 +1,9 @@
 #!/bin/bash
+# rpi3 allsky
 
 set -e
 
-cd /mnt/nas/tmp/
+cd /mnt/live/rpi3tmp/
 
 TARGETPERIOD=60
 AVERAGEVALUE=0
@@ -35,6 +36,7 @@ while :; do
 
 	T=$(date '+%Y%m%d_%H%M%S')
 	echo "$T Calculate average"
+    # ImageMagick pixel enumeration: 1,1,255,srgb
 	AVERAGERGB=$(cat /mnt/live/allsky_temp2.jpg|convert -crop 1000x1000+796+472 - - |convert -resize 1x1 - txt: |tail -1|sed -e's/0,0: (//' -e's/,/ /g'|awk '{ printf "%.0f %.0f %.0f\n", $1,$2,$3 }')
 	RED=$(  echo $AVERAGERGB|cut -d' ' -f 1)
 	GREEN=$(echo $AVERAGERGB|cut -d' ' -f 2)
@@ -59,7 +61,8 @@ while :; do
 	if [[ $OLDSHUTTERSPEED -eq 6000000 && $AVERAGEVALUE -lt 20 ]]; then
 		T=$(date '+%Y%m%d_%H%M%S')
 		echo "$T count stars"
-		S=$(cat /mnt/live/allsky_temp2.jpg|jpegtopnm 2>/dev/null|ppmtopgm|convert -crop 1000x1000+796+472 - - |convert - crop.fits && image2xy -O -g 9 crop-0.fits|awk '{ print $3 }')
+#S=$(cat /mnt/live/allsky_temp2.jpg|jpegtopnm 2>/dev/null|ppmtopgm|convert -crop 1000x1000+796+472 - - |convert - crop.fits && image2xy -O -g 9 crop-0.fits|awk '{ print $3 }')
+		S=$(cat /mnt/live/allsky_temp2.jpg|jpegtopnm 2>/dev/null|ppmtopgm|convert -crop 1000x1000+796+472 - - |convert - crop.fits && image2xy -O -g 9 crop.fits|awk '{ print $3 }')
 		echo "stars=[$S]"
 	else
 		echo "$T it is too bright, do not bother counting stars"
@@ -95,6 +98,8 @@ while :; do
 	mv /mnt/live/allsky_temp3.jpg /mnt/live/allsky.jpg
 
 	/usr/bin/logger -t ${0##*/} -i "Exposure $OLDEXPOSURE s, Average $AVERAGEVALUE, Factor $DELTAFACTOR new exposure $NEWEXPOSURE s"
+
+    cp /mnt/live/allsky.jpg /mnt/live/rpi3tmp/${FILENAMEDATE}-rpi3b.jpg
 
 	echo "update allskycamstars.rrd -t stars N:$S > /dev/shm/rrdupdate_allskycamstars"
 	echo "update allskycamstars.rrd -t stars N:$S" > /dev/shm/rrdupdate_allskycamstars

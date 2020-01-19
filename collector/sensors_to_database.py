@@ -131,6 +131,7 @@ if must_insert or db_date < datetime.datetime.utcnow() - datetime.timedelta(minu
 
     print("Hack: but first call ./query_sky_and_obsy_conditions.py")
     subprocess.call("./query_sky_and_obsy_conditions.py")
+    print("Hack: done with query_sky_and_obsy_conditions.py, continue")
 
     sql_keys.append("create_time")
     sql_values.append('"' + str(utcnow) + '"')
@@ -140,7 +141,7 @@ INSERT INTO observatory1.sensors ({keys})
     """.format(keys = ','.join(sql_keys),
                values = ','.join(sql_values))
 else:
-    print("{} is Less than a minute ago -> UPDATE".format(db_date))
+    #print("{} is Less than a minute ago -> UPDATE".format(db_date))
     sql = """
 UPDATE observatory1.sensors
    SET {assignment_list}
@@ -149,11 +150,11 @@ UPDATE observatory1.sensors
     """.format(assignment_list = ','.join(sql_assignments),
                sensors_id = row_id)
 
-print("{}".format(sql.lstrip().rstrip()))
+#print("{}".format(sql.lstrip().rstrip()))
 try:
     db_cursor.execute(sql)
     database.commit()
-    print(db_cursor.rowcount, "record inserted.")
+#    print(db_cursor.rowcount, "record inserted.")
 except:
     database.rollback()
     raise
