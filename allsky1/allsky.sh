@@ -99,6 +99,8 @@ while :; do
 
 	/usr/bin/logger -t ${0##*/} -i "Exposure $OLDEXPOSURE s, Average $AVERAGEVALUE, Factor $DELTAFACTOR new exposure $NEWEXPOSURE s"
 
+    cp /mnt/live/allsky.jpg /mnt/live/rpi3tmp/${FILENAMEDATE}-rpi3b.jpg
+
 	echo "update allskycamstars.rrd -t stars N:$S > /dev/shm/rrdupdate_allskycamstars"
 	echo "update allskycamstars.rrd -t stars N:$S" > /dev/shm/rrdupdate_allskycamstars
 
