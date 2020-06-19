@@ -9,6 +9,8 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <string.h>
+#include <errno.h>
+#include <stdbool.h>
 
 #include <pigpio.h>
 
@@ -126,6 +128,35 @@ void samples(const gpioSample_t *samples, int numSamples)
 	}
 }
 
+bool read_offset_from_config_file(char *filename, double *offset)
+{
+    char *key, *value;
+    char *separator = "=";
+    char *offset_keyword = "offset";
+    bool retval = false;
+    FILE *file = fopen(filename, "r");
+
+    if (file != NULL) {
+        char line [256];
+        while (fgets(line, sizeof(line), file) != NULL) {
+            if (line[0] == '#') {
+                continue;
+            }
+            key = strtok(line, separator);
+            value = strtok(NULL, separator);
+            if (strncasecmp(offset_keyword, key, sizeof(offset_keyword)) == 0) {
+                errno = 0;
+                *offset = strtod(value, NULL);
+                if (errno == 0) {
+                    retval = true;
+                }
+            }
+        }
+        fclose (file);
+    }
+    return(retval);
+}
+
 int main(int argc, char *argv[])
 {
 	int i, g, wave_id, mode;
@@ -135,7 +166,8 @@ int main(int argc, char *argv[])
 	char rrdupdate[99];
 	double sqm = 0.0;
 	double hz = 0;
-	char SQM_str[9];
+    char SQM_str[9];
+    double offset = 0.0;
 
 	/* get the gpios to monitor */
 	g_num_gpios = 0;
@@ -146,9 +178,15 @@ int main(int argc, char *argv[])
 	g_mask |= (1<<g);
 
 	g_opt_s = 1;
-	g_opt_r = 10;
+    g_opt_r = 10;
 
-	printf("SQM on ");
+    if (read_offset_from_config_file("sqm_offset.conf", &offset) == true) {
+        printf("SQM using offset %f on ", offset);
+    } else {
+        printf("SQM without offset on ");
+        offset = 0.0;
+    }
+
 	for (i=0; i<g_num_gpios; i++) printf("pin %d ", g_gpio[i]);
 //	printf("Sample %d [us] Refresh %d [ds] ",
 //		g_opt_s, g_opt_r); // sample and refresh rates in micro seconds, deci seconds
@@ -194,8 +232,8 @@ int main(int argc, char *argv[])
 		g_reset_counts = 1;
 
 		hz = count[0];
-		sqm = 22.0 - 2.5*log10(hz) - 0.95;
-		printf("measured %.1f [Hz] -> %.2f [mag/arcsec^2] (= -0.95 calibration)\n",
+        sqm = 22.0 - 2.5*log10(hz) + offset;
+		printf("measured %.1f [Hz] -> %.2f [mag/arcsec^2]\n",
 			   hz,
 			   sqm );
 		sprintf(rrdupdate, "update sqm.rrd -t frequency:sqm N:%.1f:%.2f\n",
