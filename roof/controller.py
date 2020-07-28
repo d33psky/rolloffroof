@@ -3,8 +3,16 @@ import threading
 import logging
 import time
 import signal
-import wiringpi
-from flask import Flask, jsonify #, makeresponse
+import os
+from flask import Flask, jsonify, request, render_template
+
+if os.uname()[4].startswith("arm"):
+    import wiringpi
+else:
+    from unittest.mock import Mock
+
+    wiringpi = Mock()
+    wiringpi.digitalRead.return_value = 0
 
 next_possible_green_button_action = 0
 GREEN_BUTTON_OPENING = 1
@@ -30,21 +38,24 @@ logging.basicConfig(
     format='(%(threadName)-10s) %(message)s',
 )
 
+
 def read_roof_sensor_open():
     """ sensor """
     global roof_opened
     state = wiringpi.digitalRead(ROOF_SENSORS_OPEN1)
-#    logging.debug('roof_sensors_open: {}'.format(state))
+    #    logging.debug('roof_sensors_open: {}'.format(state))
     roof_opened = True if state == 1 else False;
     return roof_opened
+
 
 def read_roof_sensor_close():
     """ sensor """
     global roof_closed
     state = wiringpi.digitalRead(ROOF_SENSORS_CLOSE1)
-#    logging.debug('roof_sensors_close: {}'.format(state))
+    #    logging.debug('roof_sensors_close: {}'.format(state))
     roof_closed = True if state == 1 else False;
     return roof_closed
+
 
 def write_roof_motor_stop():
     """ motor """
@@ -56,21 +67,24 @@ def write_roof_motor_stop():
     roof_opening = False
     roof_closing = False
 
+
 def write_roof_motor_close():
     """ motor """
     global roof_closing
     wiringpi.digitalWrite(ROOF_MOTOR_DIRECTION_RELAY, wiringpi.GPIO.HIGH)  # roof close direction
-    wiringpi.digitalWrite(ROOF_MOTOR_START_RELAY, wiringpi.GPIO.HIGH)   # start motor
+    wiringpi.digitalWrite(ROOF_MOTOR_START_RELAY, wiringpi.GPIO.HIGH)  # start motor
     logging.debug('write_roof_motor_close')
     roof_closing = True
-    
+
+
 def write_roof_motor_open():
     """ motor """
     global roof_opening
-    wiringpi.digitalWrite(ROOF_MOTOR_DIRECTION_RELAY, wiringpi.GPIO.LOW) # roof open direction
-    wiringpi.digitalWrite(ROOF_MOTOR_START_RELAY, wiringpi.GPIO.HIGH)   # start motor
+    wiringpi.digitalWrite(ROOF_MOTOR_DIRECTION_RELAY, wiringpi.GPIO.LOW)  # roof open direction
+    wiringpi.digitalWrite(ROOF_MOTOR_START_RELAY, wiringpi.GPIO.HIGH)  # start motor
     logging.debug('write_roof_motor_open')
     roof_opening = True
+
 
 @FLASK_APP.route('/roof/sensors/open', methods=['GET'])
 def roof_sensors_open():
@@ -78,11 +92,13 @@ def roof_sensors_open():
     state = read_roof_sensor_open()
     return jsonify({'roof_sensors_opened': state})
 
+
 @FLASK_APP.route('/roof/sensors/close', methods=['GET'])
 def roof_sensors_close():
     """ api call """
     state = read_roof_sensor_close()
     return jsonify({'roof_sensors_closed': state})
+
 
 @FLASK_APP.route('/roof/motor/stop', methods=['POST'])
 def roof_motor_stop():
@@ -91,7 +107,8 @@ def roof_motor_stop():
     global roof_opening
     global received_signal
     if roof_opening or roof_closing:
-        logging.debug('Roof is moving, force stop')
+        logging.debug('Roof is {opening_or_closing}, force stop'.format(
+            opening_or_closing='opening' if roof_opening else 'closing'))
         roof_closing = False
         roof_opening = False
         received_signal = 1
@@ -99,6 +116,7 @@ def roof_motor_stop():
     else:
         logging.debug('Roof is not moving, nothing to stop')
         return jsonify({'roof_motor_stop': False})
+
 
 @FLASK_APP.route('/roof/motor/close', methods=['POST'])
 def roof_motor_close():
@@ -115,6 +133,7 @@ def roof_motor_close():
         received_signal = 1
         return jsonify({'roof_motor_close': True})
 
+
 @FLASK_APP.route('/roof/motor/open', methods=['POST'])
 def roof_motor_open():
     """ api call """
@@ -130,8 +149,25 @@ def roof_motor_open():
         received_signal = 1
         return jsonify({'roof_motor_open': True})
 
-#@FLASK_APP.errorhandler(404)
-#def not_found(error):
+
+@FLASK_APP.route('/', methods=['POST', 'GET'])
+def index():
+    """ web call """
+    if request.method == 'POST':
+        if request.form.get('Open') == 'Open':
+            print("Web interface calling roof_motor_open")
+            roof_motor_open()
+        elif request.form.get('Close') == 'Close':
+            print("Web interface calling roof_motor_close")
+            roof_motor_close()
+        else:
+            print("Web interface calling roof_motor_stop")
+            roof_motor_stop()
+    return render_template("index.html")
+
+
+# @FLASK_APP.errorhandler(404)
+# def not_found(error):
 #    return make_response(jsonify({'error': 'Not found'}), 404)
 
 # kill -SIGUSR1 13534
@@ -141,6 +177,7 @@ def signal_handler(signum, stack_frame):
     global received_signal
     print("*** signal_handler received:", signum)
     received_signal = signum
+
 
 def wait_for_button(pin):
     """ wait green button or signal """
@@ -178,8 +215,10 @@ def wait_for_button(pin):
         else:
             print("Too brief press:", pressed_time, "ms")
 
+
 class RoofControlThread(threading.Thread):
     """ the non-flask thread """
+
     def run(self):
         logging.debug('roof thread')
         global received_signal
@@ -228,6 +267,7 @@ class RoofControlThread(threading.Thread):
                 write_roof_motor_stop()
                 received_signal = 0
 
+
 def init():
     """ set up signals and wiringpi pins """
     global next_possible_green_button_action
@@ -244,10 +284,10 @@ def init():
 
     print(time.strftime("%Y%m%d_%H%M%S"), "Set up roof closed and opened sensors as input")
     wiringpi.pinMode(ROOF_SENSORS_CLOSE1, wiringpi.GPIO.INPUT)
-    wiringpi.pinMode(ROOF_SENSORS_OPEN1,  wiringpi.GPIO.INPUT)
+    wiringpi.pinMode(ROOF_SENSORS_OPEN1, wiringpi.GPIO.INPUT)
 
     print(time.strftime("%Y%m%d_%H%M%S"), "Set up left and right relay as output")
-    wiringpi.pinMode(ROOF_MOTOR_START_RELAY,     wiringpi.GPIO.OUTPUT)
+    wiringpi.pinMode(ROOF_MOTOR_START_RELAY, wiringpi.GPIO.OUTPUT)
     wiringpi.pinMode(ROOF_MOTOR_DIRECTION_RELAY, wiringpi.GPIO.OUTPUT)
 
     if read_roof_sensor_open():
@@ -258,6 +298,7 @@ def init():
     else:
         next_possible_green_button_action = GREEN_BUTTON_CLOSING
     write_roof_motor_stop()
+
 
 def main():
     """ main """
@@ -271,6 +312,7 @@ def main():
     except KeyboardInterrupt:
         print(time.strftime("%Y%m%d_%H%M%S"), "KeyboardInterrupt caught in flask. Stop any running motor")
         write_roof_motor_stop()
+
 
 if __name__ == '__main__':
     main()
