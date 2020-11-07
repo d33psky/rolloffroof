@@ -27,6 +27,7 @@ sub readTempAndHumidity {
 	my $humidity = '';
 	my $temperature = '';
 	my $dht=`./loldht $pin`;
+	print $dht;
 	$_ = $dht;
 	# pin 8 Humidity = 53.50 % Temperature = 8.50 *C 
 	m/.*Humidity = (.*) . Temperature = (.*) .C/ && do {
@@ -116,7 +117,7 @@ sub readUPS {
 	}
 	close(FH) or die "ERROR: cannot close apcaccess: $!\n";
 
-#	print "STATUS $status LINEV $linev LOADPCT $loadpct BCHARGE $bcharge TIMELEFT $timeleft ITEMP $itemp BATTV $battv LINEFREQ $linefreq\n";
+	print "STATUS $status LINEV $linev LOADPCT $loadpct BCHARGE $bcharge TIMELEFT $timeleft ITEMP $itemp BATTV $battv LINEFREQ $linefreq\n";
 
 	my $message = "update $rrdname.rrd -t status:linev:loadpct:bcharge:timeleft:itemp:battv:linefreq N:$status:$linev:$loadpct:$bcharge:$timeleft:$itemp:$battv:$linefreq";
 
