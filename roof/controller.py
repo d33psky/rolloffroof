@@ -4,6 +4,7 @@ import logging
 import time
 import signal
 import os
+import socket
 from flask import Flask, jsonify, request, render_template
 
 if os.uname()[4].startswith("arm"):
@@ -30,6 +31,9 @@ ROOF_SENSORS_CLOSE1 = 12
 ROOF_MOTOR_START_RELAY = 0
 ROOF_MOTOR_DIRECTION_RELAY = 1
 GREEN_BUTTON = 18
+
+MOUNT_IP = "192.168.100.73"
+MOUNT_PORT = 3490
 
 FLASK_APP = Flask(__name__)
 
@@ -86,6 +90,23 @@ def write_roof_motor_open():
     roof_opening = True
 
 
+def simple_netcat(host, port, content, sleep):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect((host, port))
+    s.sendall(content.encode())
+    time.sleep(sleep)
+    s.shutdown(socket.SHUT_WR)
+    response_ascii = ''
+    while True:
+        data = s.recv(128)
+        if not data:
+            break
+        response_ascii += data.decode('ascii')
+        # print(repr(data))
+    s.close()
+    return response_ascii
+
+
 @FLASK_APP.route('/roof/sensors/open', methods=['GET'])
 def roof_sensors_open():
     """ api call """
@@ -128,10 +149,17 @@ def roof_motor_close():
         roof_closing = False
         return jsonify({'roof_motor_close': False})
     else:
-        logging.debug('roof_motor_close')
-        roof_closing = True
-        received_signal = 1
-        return jsonify({'roof_motor_close': True})
+        # First check if the mount is parked in order to prevent the roof from knocking over the mount.
+        response = simple_netcat(MOUNT_IP, MOUNT_PORT, "#:Gstat#", 0.5)
+        if response == '5#':
+            logging.debug('mount is parked, continue to roof_motor_close')
+            roof_closing = True
+            received_signal = 1
+            return jsonify({'roof_motor_close': True})
+        else:
+            logging.debug('mount IS NOT PARKED, REFUSE TO roof_motor_close')
+            roof_closing = False
+            return jsonify({'roof_motor_close': False})
 
 
 @FLASK_APP.route('/roof/motor/open', methods=['POST'])
