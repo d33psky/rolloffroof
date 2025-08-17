@@ -43,8 +43,8 @@ INDI_CAP_PROPERTY = None
 INDI_DOME_PARK_PROPERTY = 'Dome Scripting Gateway.DOME_PARK.PARK'
 INDI_DOME_PARK_PROPERTY_PARK_SETTING = 'On'
 #INDI_CAMERA_COOLER = 'ZWO CCD ASI1600MM-Cool.CCD_COOLER.COOLER_ON'
-INDI_CAMERA_COOLER = 'ZWO CCD ASI2600MM Pro.CCD_COOLER.COOLER_ON'
-INDI_CAMERA_COOLER_PROPERTY = 'Off'
+INDI_CAMERA_COOLER = 'ZWO CCD ASI2600MM Pro.CCD_COOLER.COOLER_OFF'
+INDI_CAMERA_COOLER_PROPERTY = 'On'
 MAIN_LOOP_SLEEP_SECONDS = 60
 INDI_COMMAND_TIMEOUT = 5
 MOUNT_PARK_TIMEOUT = 60
@@ -277,7 +277,8 @@ class BasicIndi():
             self.logger.critical("warm_camera failed")
             time.sleep(1)
             return False
-        self.logger.debug("{} {} {}".format(__class__, cmd, ws.stdout.rstrip()))
+        self.logger.info("warm_camera: command completed with return code: {}, stdout: [{}], stderr: [{}]".format(
+            ws.returncode, ws.stdout.rstrip(), ws.stderr.rstrip()))
         return ws.returncode == 0
 
 
