@@ -372,53 +372,69 @@ def main():
 
     looping = True
     while looping:
-        if args.once:
-            looping = False
-        weather_safety_status = basic_indi.get_weather_safety(weather_meta_station_indexes=WEATHER_META_STATION_INDEXES,
-                                                              indi_command_timeout=INDI_COMMAND_TIMEOUT)
-        roof_safety_status = basic_indi.get_roof_safety(indi_command_timeout=INDI_COMMAND_TIMEOUT)
-        if weather_safety_status:
-            if roof_safety_status:
-                logger.info('weather is safe, roof is closed, but we do not start ekos scheduler')
-                # ekos_dbus.start_scheduler()
+        try:
+            if args.once:
+                looping = False
+            weather_safety_status = basic_indi.get_weather_safety(weather_meta_station_indexes=WEATHER_META_STATION_INDEXES,
+                                                                  indi_command_timeout=INDI_COMMAND_TIMEOUT)
+            roof_safety_status = basic_indi.get_roof_safety(indi_command_timeout=INDI_COMMAND_TIMEOUT)
+            
+            if weather_safety_status is None or roof_safety_status is None:
+                logger.error('Failed to get safety status from INDI server - INDI server may be down. Will retry in {} seconds.'.format(MAIN_LOOP_SLEEP_SECONDS))
+                if looping:
+                    logger.debug("sleep {}".format(MAIN_LOOP_SLEEP_SECONDS))
+                    time.sleep(MAIN_LOOP_SLEEP_SECONDS)
+                continue
+                
+            if weather_safety_status:
+                if roof_safety_status:
+                    logger.info('weather is safe, roof is closed, but we do not start ekos scheduler')
+                    # ekos_dbus.start_scheduler()
+                else:
+                    logger.info('weather is safe, roof is open')
             else:
-                logger.info('weather is safe, roof is open')
-        else:
-            if roof_safety_status:
-                logger.info('weather is unsafe, roof is closed')
-            else:
-                #logger.warning('weather is unsafe, roof is open. Sleep {} seconds in case ekos scheduler still works'.format(2 * MAIN_LOOP_SLEEP_SECONDS))
-                #time.sleep(MAIN_LOOP_SLEEP_SECONDS)
-                logger.warning('weather is unsafe, roof is open, stop ekos scheduler')
-                ekos_dbus.stop_scheduler()
-                # there's no way to tell yet if stopping the ekos scheduler succeeded or not
-                # furthermore stopping the scheduler does not park or close anything, so that is done here :
+                if roof_safety_status:
+                    logger.info('weather is unsafe, roof is closed')
+                else:
+                    #logger.warning('weather is unsafe, roof is open. Sleep {} seconds in case ekos scheduler still works'.format(2 * MAIN_LOOP_SLEEP_SECONDS))
+                    #time.sleep(MAIN_LOOP_SLEEP_SECONDS)
+                    logger.warning('weather is unsafe, roof is open, stop ekos scheduler')
+                    try:
+                        ekos_dbus.stop_scheduler()
+                    except Exception as e:
+                        logger.error('Failed to stop ekos scheduler: {}'.format(e))
+                    # there's no way to tell yet if stopping the ekos scheduler succeeded or not
+                    # furthermore stopping the scheduler does not park or close anything, so that is done here :
 
-                logger.warning('park mount')
-                success = basic_indi.park_mount(indi_command_timeout=INDI_COMMAND_TIMEOUT,
-                                                mount_park_timeout=MOUNT_PARK_TIMEOUT)
-                if not success:
-                    alert_and_abort("Failed to park the mount, tried {} times".format(basic_indi.get_max_retries()))
+                    logger.warning('park mount')
+                    success = basic_indi.park_mount(indi_command_timeout=INDI_COMMAND_TIMEOUT,
+                                                    mount_park_timeout=MOUNT_PARK_TIMEOUT)
+                    if not success:
+                        alert_and_abort("Failed to park the mount, tried {} times".format(basic_indi.get_max_retries()))
 
-                logger.warning('close cap')
-                success = basic_indi.close_cap(indi_command_timeout=INDI_COMMAND_TIMEOUT,
-                                               cap_close_timeout=CAP_CLOSE_TIMEOUT)
-                if not success:
-                    alert_and_abort("Failed to close the cap, tried {} times".format(basic_indi.get_max_retries()))
+                    logger.warning('close cap')
+                    success = basic_indi.close_cap(indi_command_timeout=INDI_COMMAND_TIMEOUT,
+                                                   cap_close_timeout=CAP_CLOSE_TIMEOUT)
+                    if not success:
+                        alert_and_abort("Failed to close the cap, tried {} times".format(basic_indi.get_max_retries()))
 
-                logger.warning('close roof')
-                success = basic_indi.close_roof(indi_command_timeout=INDI_COMMAND_TIMEOUT,
-                                                roof_close_timeout=ROOF_CLOSE_TIMEOUT)
-                if not success:
-                    alert_and_abort("Failed to close the roof, tried {} times".format(basic_indi.get_max_retries()))
+                    logger.warning('close roof')
+                    success = basic_indi.close_roof(indi_command_timeout=INDI_COMMAND_TIMEOUT,
+                                                    roof_close_timeout=ROOF_CLOSE_TIMEOUT)
+                    if not success:
+                        alert_and_abort("Failed to close the roof, tried {} times".format(basic_indi.get_max_retries()))
 
-                logger.warning('warm camera')
-                success = basic_indi.warm_camera(indi_command_timeout=INDI_COMMAND_TIMEOUT)
-                if not success:
-                    logger.warning('failed to warm the camera, this is not critical to safety so just continue')
-        if looping:
-            logger.debug("sleep {}".format(MAIN_LOOP_SLEEP_SECONDS))
-            time.sleep(MAIN_LOOP_SLEEP_SECONDS)
+                    logger.warning('warm camera')
+                    success = basic_indi.warm_camera(indi_command_timeout=INDI_COMMAND_TIMEOUT)
+                    if not success:
+                        logger.warning('failed to warm the camera, this is not critical to safety so just continue')
+            if looping:
+                logger.debug("sleep {}".format(MAIN_LOOP_SLEEP_SECONDS))
+                time.sleep(MAIN_LOOP_SLEEP_SECONDS)
+        except Exception as e:
+            logger.error('Unexpected error in main loop: {}. Will retry in {} seconds.'.format(e, MAIN_LOOP_SLEEP_SECONDS))
+            if looping:
+                time.sleep(MAIN_LOOP_SLEEP_SECONDS)
 
 
 if __name__ == "__main__":
