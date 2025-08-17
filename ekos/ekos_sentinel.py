@@ -30,7 +30,7 @@ Modify the static config in this script for your setup.
 
 INDI_WEATHER_PROPERTY = 'Weather Meta.WEATHER_STATUS.STATION_STATUS'
 INDI_WEATHER_PROPERTY_OK_SETTING = 'Ok'
-WEATHER_META_STATION_INDEXES = {1, 2}
+WEATHER_META_STATION_INDEXES = {1}
 INDI_MOUNT_PARK_PROPERTY = '10micron.TELESCOPE_PARK.PARK'
 INDI_MOUNT_PARK_PROPERTY_PARK_SETTING = 'On'
 INDI_MOUNT_TRACK_STATE = '10micron.TELESCOPE_TRACK_STATE.TRACK_ON'
@@ -42,7 +42,8 @@ INDI_CAP = None
 INDI_CAP_PROPERTY = None
 INDI_DOME_PARK_PROPERTY = 'Dome Scripting Gateway.DOME_PARK.PARK'
 INDI_DOME_PARK_PROPERTY_PARK_SETTING = 'On'
-INDI_CAMERA_COOLER = 'ZWO CCD ASI1600MM-Cool.CCD_COOLER.COOLER_ON'
+#INDI_CAMERA_COOLER = 'ZWO CCD ASI1600MM-Cool.CCD_COOLER.COOLER_ON'
+INDI_CAMERA_COOLER = 'ZWO CCD ASI2600MM Pro.CCD_COOLER.COOLER_ON'
 INDI_CAMERA_COOLER_PROPERTY = 'Off'
 MAIN_LOOP_SLEEP_SECONDS = 60
 INDI_COMMAND_TIMEOUT = 5
@@ -64,12 +65,14 @@ class BasicIndi():
         self.host = host
         self.logger = logging.getLogger('ekos_sentinel')
         self.max_retries = 1
+        self.safe_counter = 0
+        self.safe_count_max = 3
 
     def get_max_retries(self):
         return self.max_retries
 
     def set_max_retries(self, retries):
-        self.max_retries = retries
+        self.max_retries = int(retries)
 
     def _run(self, cmd, timeout):
         try:
@@ -101,9 +104,16 @@ class BasicIndi():
             if ws.stdout.rstrip() == INDI_WEATHER_PROPERTY_OK_SETTING:
                 safe += 1
         if safe == len(weather_meta_station_indexes):
+            self.safe_counter = 0
             return True
         else:
-            return False
+            self.safe_counter += 1
+            if self.safe_counter >= self.safe_count_max:
+                self.logger.info("weather unsafe, count {count} >= max {max_count}, report UNSAFE".format(count=self.safe_counter, max_count=self.safe_count_max))
+                return False
+            else:
+                self.logger.info("weather unsafe, count {count} < max {max_count}, report SAFE".format(count=self.safe_counter, max_count=self.safe_count_max))
+                return True
 
     def get_roof_safety(self, indi_command_timeout):
         cmd = "indi_getprop -h {host} -1 '{property}'".format(host=self.host, property=INDI_DOME_PARK_PROPERTY)
@@ -265,6 +275,7 @@ class BasicIndi():
         ws = self._run(cmd, indi_command_timeout)
         if not ws:
             self.logger.critical("warm_camera failed")
+            time.sleep(1)
             return False
         self.logger.debug("{} {} {}".format(__class__, cmd, ws.stdout.rstrip()))
         return ws.returncode == 0
@@ -367,14 +378,16 @@ def main():
         roof_safety_status = basic_indi.get_roof_safety(indi_command_timeout=INDI_COMMAND_TIMEOUT)
         if weather_safety_status:
             if roof_safety_status:
-                logger.info('weather is safe, roof is closed, start ekos scheduler')
-                ekos_dbus.start_scheduler()
+                logger.info('weather is safe, roof is closed, but we do not start ekos scheduler')
+                # ekos_dbus.start_scheduler()
             else:
                 logger.info('weather is safe, roof is open')
         else:
             if roof_safety_status:
                 logger.info('weather is unsafe, roof is closed')
             else:
+                #logger.warning('weather is unsafe, roof is open. Sleep {} seconds in case ekos scheduler still works'.format(2 * MAIN_LOOP_SLEEP_SECONDS))
+                #time.sleep(MAIN_LOOP_SLEEP_SECONDS)
                 logger.warning('weather is unsafe, roof is open, stop ekos scheduler')
                 ekos_dbus.stop_scheduler()
                 # there's no way to tell yet if stopping the ekos scheduler succeeded or not
