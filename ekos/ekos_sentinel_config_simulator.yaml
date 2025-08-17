@@ -1,0 +1,41 @@
+# Simulator configuration for ekos_sentinel.py - Testing with INDI simulators
+description: "Simulator configuration for testing with INDI simulators"
+
+indi:
+  weather:
+    # No weather simulator available, so we'll need to mock this
+    property: "Weather Simulator.WEATHER_STATUS.STATION_STATUS"
+    ok_setting: "Ok"
+    station_indexes: [1]
+  
+  mount:
+    park_property: "Telescope Simulator.TELESCOPE_PARK.PARK"
+    park_setting: "On"
+    track_state_property: "Telescope Simulator.TELESCOPE_TRACK_STATE.TRACK_ON"
+    track_state_setting: "Off"
+    coord_dec_property: "Telescope Simulator.EQUATORIAL_EOD_COORD.DEC"
+    coord_dec_park_position: "0"  # Simulator starts at 0
+    coord_dec_max_offset: "1"
+  
+  dome:
+    park_property: "Dome Simulator.DOME_PARK.PARK"
+    park_setting: "On"
+  
+  camera:
+    cooler_property: "CCD Simulator.CCD_COOLER.COOLER_OFF"
+    cooler_setting: "On"
+  
+  cap:
+    property: null  # No dust cap simulator
+    setting: null
+
+timeouts:
+  indi_command: 5
+  mount_park: 30  # Simulators are faster
+  roof_close: 30
+  cap_close: 30
+
+safety:
+  unsafe_count_max: 2  # Faster response for testing
+  main_loop_sleep_seconds: 10  # More frequent checks for testing
+  max_retries: 1

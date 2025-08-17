@@ -34,3 +34,12 @@
 .project
 .pydevproject
 .idea
+
+# Python cache directories
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache/
