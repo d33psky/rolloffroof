@@ -102,10 +102,18 @@ sql_assignments = []
 i = 0
 while i < len(keys):
     field_name_2 = key_mapper.get(keys[i], "Unknown KEY")
+    raw_value = values[i+1]
+    
+    # Handle empty values by converting to NULL
+    if raw_value == '' or raw_value == 'U':
+        sql_value = 'NULL'
+    else:
+        sql_value = "{}".format(raw_value)
+    
     sql_keys.append("{}_{}".format(field_name_1, field_name_2))
-    sql_values.append("{}".format(values[i+1]))
-    #print("{}_{} = {}".format(field_name_1, keys[i], values[i+1]))
-    sql_assignments.append("{}_{}={}".format(field_name_1, field_name_2, values[i+1]))
+    sql_values.append(sql_value)
+    #print("{}_{} = {}".format(field_name_1, keys[i], sql_value))
+    sql_assignments.append("{}_{}={}".format(field_name_1, field_name_2, sql_value))
     i += 1
 
 sql = """

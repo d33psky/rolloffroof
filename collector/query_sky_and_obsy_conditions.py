@@ -37,7 +37,38 @@ def check_db(minutes):
         print("DB last timestamp {db_date} is Less than {minutes} minutes ago -> open".format(db_date=db_date, minutes=minutes))
         return(sensors_id)
 
+def check_sensor_data_age(sensor_column, max_age_minutes, sensor_name):
+    """Check if sensor data is recent enough to be considered valid"""
+    sql = """
+      SELECT create_time
+        FROM sensors
+       WHERE {sensor_column} IS NOT NULL
+    ORDER BY create_time DESC
+       LIMIT 1;
+    """.format(sensor_column=sensor_column)
+    db_cursor.execute(sql)
+    db_result_tuple = db_cursor.fetchone()
+    
+    if db_result_tuple is None:
+        print("{sensor_name} has no data -> assuming sensor failure".format(sensor_name=sensor_name))
+        return False
+        
+    last_data_time = db_result_tuple[0]
+    age_minutes = (datetime.datetime.utcnow() - last_data_time).total_seconds() / 60
+    
+    if age_minutes <= max_age_minutes:
+        return True
+    else:
+        print("{sensor_name} data is {age:.1f} minutes old (max {max_age} allowed) -> assuming sensor failure".format(
+            sensor_name=sensor_name, age=age_minutes, max_age=max_age_minutes))
+        return False
+
 def check_sqm(sensors_id, sqm_min):
+    # Check if SQM data is recent enough (3 minutes tolerance)
+    if not check_sensor_data_age('sqm1_sqm', 3, 'SQM'):
+        print("SQM sensor data too old -> skip SQM check (observatory can continue)")
+        return True  # Non-critical sensor, allow operation
+    
     sql = """
       SELECT sqm1_sqm
         FROM sensors
@@ -51,6 +82,9 @@ def check_sqm(sensors_id, sqm_min):
         sqm  = db_result_tuple[0]
     except:
         raise
+    if sqm is None:
+        print("SQM sensor data missing from current record -> skip SQM check")
+        return True  # Allow operation without SQM data
     if sqm >= sqm_min:
         print("SQM {sqm} >= minimum {sqm_min} -> open".format(sqm=sqm, sqm_min=sqm_min))
         return(True)
@@ -81,6 +115,11 @@ def check_sqm_past(sqm_min, seconds, outlier_count_max):
         return(False)
 
 def check_rain(sensors_id, drops_min):
+    # Check if rain sensor data is recent enough (2 minutes tolerance)
+    if not check_sensor_data_age('rainsensor1_drops', 2, 'Rain sensor'):
+        print("Rain sensor data too old -> assume no rain (observatory can continue)")
+        return True  # Assume no rain if sensor is down
+    
     sql = """
       SELECT rainsensor1_drops
         FROM sensors
@@ -94,6 +133,9 @@ def check_rain(sensors_id, drops_min):
         drops  = db_result_tuple[0]
     except:
         raise
+    if drops is None:
+        print("Rain sensor data missing from current record -> assume no rain")
+        return True  # Assume no rain if data is missing
     if drops <= drops_min:
         print("Rain drops {drops} <= minimum {drops_min} -> open".format(drops=drops, drops_min=drops_min))
         return(True)
@@ -123,6 +165,11 @@ def check_rain_past(drops_min, seconds, outlier_count_max):
         return(False)
 
 def check_ups_is_on_mains(sensors_id, min_ups_bcharge):
+    # Check if UPS data is recent enough (2 minutes tolerance)
+    if not check_sensor_data_age('ups1_status', 2, 'UPS'):
+        print("UPS sensor data too old -> assume power OK (observatory can continue)")
+        return True  # Assume power is OK if UPS monitoring is down
+    
     sql = """
       SELECT ups1_status, ups1_bcharge
         FROM sensors
@@ -137,6 +184,9 @@ def check_ups_is_on_mains(sensors_id, min_ups_bcharge):
         ups_bcharge = db_result_tuple[1]
     except:
         raise
+    if ups_status is None or ups_bcharge is None:
+        print("UPS sensor data missing from current record -> assume power OK")
+        return True  # Assume power is OK if data is missing
     if ups_status == 1 and ups_bcharge >= min_ups_bcharge:
         print("UPS is powered and battery charge {bcharge} >= {min_ups_bcharge} -> open".format(bcharge=ups_bcharge, min_ups_bcharge=min_ups_bcharge))
         return True
@@ -148,6 +198,12 @@ def check_ups_is_on_mains(sensors_id, min_ups_bcharge):
         return False
 
 def check_infrared(sensors_id, sensor, minimum_delta_t):
+    # Check if infrared sensor data is recent enough (5 minutes tolerance for critical cloud detection)
+    sensor_column = '{}_temperature_sensor'.format(sensor)
+    if not check_sensor_data_age(sensor_column, 5, '{} infrared sensor'.format(sensor)):
+        print("{sensor} infrared sensor data too old -> assume cloudy (close for safety)".format(sensor=sensor))
+        return False  # Cloud sensors are critical - assume cloudy if down
+    
     sql = """
       SELECT {sensor}_temperature_sensor
              , {sensor}_temperature_sky
@@ -165,6 +221,9 @@ def check_infrared(sensors_id, sensor, minimum_delta_t):
         delta_t            = db_result_tuple[2]
     except:
         raise
+    if temperature_sensor is None or temperature_sky is None or delta_t is None:
+        print("Sensor {sensor} infrared data missing from current record -> assume cloudy".format(sensor=sensor))
+        return False  # Assume cloudy for safety
     if delta_t >= minimum_delta_t:
         print("Sensor {sensor} sky temperature delta ({temperature_sensor} - {temperature_sky} = {delta_t}) >= {minimum_delta_t} -> open".format(sensor=sensor, temperature_sensor=temperature_sensor, temperature_sky=temperature_sky, delta_t=delta_t, minimum_delta_t=minimum_delta_t))
         return(True)
