@@ -52,7 +52,7 @@ PRINT:dew8min:"outsidedewtempmin_%6.0lf" \
 LINE1:dew9#FF00FF:"Observatory Dewpoint\t" \
 PRINT:dew9max:"obsdewtempmax_%6.0lf" \
 PRINT:dew9min:"obsdewtempmin_%6.0lf" \
-LINE1:hum8#00FF00:"Outside Humidity\t\t" \
+LINE1:hum8#00FF00:"Outside     Humidity\t\t" \
 PRINT:hum8max:"outsidehummax_%6.0lf" \
 PRINT:hum8min:"outsidehummin_%6.0lf" \
 LINE1:hum9#000000:"Observatory Humidity\t" \
@@ -151,7 +151,7 @@ PRINT:dew8min:"outsidedewtempmin_%6.0lf" \
 LINE1:dew9#FF00FF:"Observatory Dewpoint\t" \
 PRINT:dew9max:"obsdewtempmax_%6.0lf" \
 PRINT:dew9min:"obsdewtempmin_%6.0lf" \
-LINE1:hum8#00FF00:"Outside Humidity\t\t" \
+LINE1:hum8#00FF00:"Outside     Humidity\t\t" \
 PRINT:hum8max:"outsidehummax_%6.0lf" \
 PRINT:hum8min:"outsidehummin_%6.0lf" \
 LINE1:hum9#000000:"Observatory Humidity\t" \
@@ -365,8 +365,8 @@ humidity()
 	RRD+=("VDEF:hcammax=hcam,MAXIMUM")
 	RRD+=("VDEF:hcamavg=hcam,AVERAGE")
 	RRD+=("VDEF:hcammin=hcam,MINIMUM")
-	RRD+=("COMMENT:'\t\t\t\t\tlast\t\t    max\t   avg\t  min\l'")
-	RRD+=("LINE1:hum8#00FF00:'Outside Humidity\t\t'")
+	RRD+=("COMMENT:'\t\t\t\tlast\t\t    max\t   avg\t  min\l'")
+	RRD+=("LINE1:hum8#00FF00:'Outside     Humidity\t'")
 	RRD+=("GPRINT:hum8:LAST:'%6.2lf%S%%\\t'")
 	RRD+=("GPRINT:hum8max:'%6.2lf\t'")
 	RRD+=("GPRINT:hum8avg:'%6.2lf\t'")
@@ -376,7 +376,7 @@ humidity()
 	RRD+=("GPRINT:hum9max:'%6.2lf\t'")
 	RRD+=("GPRINT:hum9avg:'%6.2lf\t'")
 	RRD+=("GPRINT:hum9min:'%6.2lf\t%%\\l'")
-	RRD+=("LINE1:hcam#FF0000:'PiCamera Humidity\t\t'")
+	RRD+=("LINE1:hcam#FF0000:'PiCamera    Humidity\t'")
 	RRD+=("GPRINT:hcam:LAST:'%6.2lf%S%%\\t'")
 	RRD+=("GPRINT:hcammax:'%6.2lf\t'")
 	RRD+=("GPRINT:hcamavg:'%6.2lf\t'")
@@ -716,7 +716,7 @@ skytemp() {
 	RRD+=("VDEF:BCC_skymax=BCC_sky,MAXIMUM")
 	RRD+=("VDEF:BCC_skyavg=BCC_sky,AVERAGE")
 	RRD+=("VDEF:BCC_skymin=BCC_sky,MINIMUM")
-	RRD+=("COMMENT:'\t\t\t\t\tlast      max       avg       min\l'")
+	RRD+=("COMMENT:'\t\t\t\t\tlast\tmax\tavg\tmin\l'")
 	RRD+=("LINE1:BAA_sensor#0000FF:'BAA sensor temperature\t'")
 	RRD+=("GPRINT:BAA_sensor:LAST:'%6.2lf\t'")
 	RRD+=("GPRINT:BAA_sensormax:'%6.2lf\t'")
@@ -727,12 +727,12 @@ skytemp() {
 	RRD+=("GPRINT:BCC_sensormax:'%6.2lf\t'")
 	RRD+=("GPRINT:BCC_sensoravg:'%6.2lf\t'")
 	RRD+=("GPRINT:BCC_sensormin:'%6.2lf\tC\l'")
-	RRD+=("LINE1:BAA_sky#FF0000:'BAA sky temperature\t'")
+	RRD+=("LINE1:BAA_sky#FF0000:'BAA sky temperature\t\t'")
 	RRD+=("GPRINT:BAA_sky:LAST:'%6.2lf\t'")
 	RRD+=("GPRINT:BAA_skymax:'%6.2lf\t'")
 	RRD+=("GPRINT:BAA_skyavg:'%6.2lf\t'")
 	RRD+=("GPRINT:BAA_skymin:'%6.2lf\tC\l'")
-	RRD+=("LINE1:BCC_sky#FF00FF:'BCC sky temperature\t'")
+	RRD+=("LINE1:BCC_sky#FF00FF:'BCC sky temperature\t\t'")
 	RRD+=("GPRINT:BCC_sky:LAST:'%6.2lf\t'")
 	RRD+=("GPRINT:BCC_skymax:'%6.2lf\t'")
 	RRD+=("GPRINT:BCC_skyavg:'%6.2lf\t'")
@@ -798,7 +798,7 @@ allskycamstars() {
 	RRD+=("VDEF:starsavg=stars,AVERAGE")
 	RRD+=("VDEF:starsmin=stars,MINIMUM")
 	RRD+=("COMMENT:'\t\t\t\t\t\t\t\t\t\t\t\t\ttime [h]\n'")
-	RRD+=("COMMENT:'\t\t\t\tlast\t\t    max\t   avg\t  min\l'")
+	RRD+=("COMMENT:'\t\t\t\tlast\t    max\t   avg\t  min\l'")
 	RRD+=("LINE1:stars#0000FF:'AllSkyCam Stars\t'")
 	RRD+=("GPRINT:stars:LAST:'%6.0lf\t'")
 	RRD+=("GPRINT:starsmax:'%6.0lf\t'")

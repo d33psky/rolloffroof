@@ -339,28 +339,47 @@ def main():
 #    if roof_status == 1:
     last_open_ok     = retrieve_previous_open_ok()
     if last_open_ok is True:
-        sqm_min_hysterese = 6
-        minimum_delta_t_hysterese = 7
+#        sqm_min_hysterese = 6
+#        sqm_min_hysterese = 5
+        sqm_min_hysterese = 1
+#        minimum_delta_t_hysterese = 7
+#        minimum_delta_t_hysterese = 5
+#        minimum_delta_t_hysterese = 4
+        minimum_delta_t_hysterese = 3
     else:
         sqm_min_hysterese = 0
         minimum_delta_t_hysterese = 0
 
+#    required_baa_delta_t = 11
+#    required_baa_delta_t = 17
+    required_baa_delta_t = 30
+    required_baa_delta_t = 18
+    required_baa_delta_t = 15
+    required_baa_delta_t = 13
+    required_bcc_delta_t = 20
+    required_bcc_delta_t = 14
+
     sqm_now_ok       = check_sqm(sensors_id, sqm_min=17.5 - sqm_min_hysterese)
+#    sqm_now_ok       = check_sqm(sensors_id, sqm_min=16.5 - sqm_min_hysterese)
     rain_now_ok      = check_rain(sensors_id, drops_min=1)
     ups_now_ok1      = check_ups_is_on_mains(sensors_id, 99.0)
     if ups_now_ok1 is False:
         # might be self-test. check previous minute
         ups_now_ok2  = check_ups_is_on_mains(sensors_id - 1, 99.0)
 
-    infrared1_now_ok = check_infrared(sensors_id, sensor='BAA1', minimum_delta_t=20 - minimum_delta_t_hysterese)
-    infrared2_now_ok = check_infrared(sensors_id, sensor='BCC1', minimum_delta_t=20 - minimum_delta_t_hysterese)
+    #infrared1_now_ok = check_infrared(sensors_id, sensor='BAA1', minimum_delta_t=20 - minimum_delta_t_hysterese)
+    infrared1_now_ok = check_infrared(sensors_id, sensor='BAA1', minimum_delta_t=required_baa_delta_t - minimum_delta_t_hysterese)
+    infrared2_now_ok = check_infrared(sensors_id, sensor='BCC1', minimum_delta_t=required_bcc_delta_t - minimum_delta_t_hysterese)
 
-    sqm_past_ok       = check_sqm_past(sqm_min=17.5 - sqm_min_hysterese, seconds=3600, outlier_count_max=5)
+#    sqm_past_ok       = check_sqm_past(sqm_min=17.5 - sqm_min_hysterese, seconds=3600, outlier_count_max=5)
+    sqm_past_ok       = check_sqm_past(sqm_min=16.5 - sqm_min_hysterese, seconds=300, outlier_count_max=5)
     rain_past_ok      = check_rain_past(drops_min=1, seconds=3600, outlier_count_max=2)
-    infrared1_past_ok = check_infrared_past(sensor='BAA1', minimum_delta_t=20 - minimum_delta_t_hysterese, seconds=3600, outlier_count_max=5)
-    infrared2_past_ok = check_infrared_past(sensor='BCC1', minimum_delta_t=20 - minimum_delta_t_hysterese, seconds=3600, outlier_count_max=5)
+    #infrared1_past_ok = check_infrared_past(sensor='BAA1', minimum_delta_t=20 - minimum_delta_t_hysterese, seconds=3600, outlier_count_max=5)
+    infrared1_past_ok = check_infrared_past(sensor='BAA1', minimum_delta_t=required_baa_delta_t - minimum_delta_t_hysterese, seconds=3600, outlier_count_max=5)
+    infrared2_past_ok = check_infrared_past(sensor='BCC1', minimum_delta_t=required_bcc_delta_t - minimum_delta_t_hysterese, seconds=3600, outlier_count_max=5)
 
     closing_event_past_ok = last_event_long_enough_ago(event="closing", seconds=3600, outlier_count_max=1)
+    #closing_event_past_ok = last_event_long_enough_ago(event="closing", seconds=60, outlier_count_max=1)
 
     reason_open = []
     reason_close = []
