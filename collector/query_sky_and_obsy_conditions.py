@@ -223,6 +223,7 @@ def check_infrared(sensors_id, sensor, minimum_delta_t):
         raise
     if temperature_sensor is None or temperature_sky is None or delta_t is None:
         print("Sensor {sensor} infrared data missing from current record -> assume cloudy".format(sensor=sensor))
+        print("DEBUG: temperature_sensor={}, temperature_sky={}, delta_t={}".format(repr(temperature_sensor), repr(temperature_sky), repr(delta_t)))
         return False  # Assume cloudy for safety
     if delta_t >= minimum_delta_t:
         print("Sensor {sensor} sky temperature delta ({temperature_sensor} - {temperature_sky} = {delta_t}) >= {minimum_delta_t} -> open".format(sensor=sensor, temperature_sensor=temperature_sensor, temperature_sky=temperature_sky, delta_t=delta_t, minimum_delta_t=minimum_delta_t))
