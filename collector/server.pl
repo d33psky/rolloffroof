@@ -37,7 +37,8 @@ while(1) {
 		
 		# Clean up empty values for rrdtool (replace empty strings with 'U' for unknown)
 		my $rrd_data = $data;
-		$rrd_data =~ s/::/U:/g;  # Replace :: with U:
+		# Handle multiple consecutive empty values - keep replacing until no more :: found
+		while ($rrd_data =~ s/::/:U:/g) { }
 		$rrd_data =~ s/:$/:U/g;  # Replace trailing : with :U
 		
 		system ("/usr/bin/rrdtool $rrd_data");
