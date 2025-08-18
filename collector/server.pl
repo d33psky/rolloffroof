@@ -34,7 +34,13 @@ while(1) {
 	if ($data =~ m/^update/i) {
 		print "$data\n";
 		system ("./sensors_to_database.py $data");
-		system ("/usr/bin/rrdtool $data");
+		
+		# Clean up empty values for rrdtool (replace empty strings with 'U' for unknown)
+		my $rrd_data = $data;
+		$rrd_data =~ s/::/U:/g;  # Replace :: with U:
+		$rrd_data =~ s/:$/:U/g;  # Replace trailing : with :U
+		
+		system ("/usr/bin/rrdtool $rrd_data");
 	} else {
 		print "received UNKNOWN data: [$data]\n";
 	}
