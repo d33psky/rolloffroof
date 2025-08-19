@@ -1,0 +1,33 @@
+# Production configuration for mount_position_monitor.py - Real observatory hardware
+description: "Production configuration for mount position monitoring with real observatory hardware"
+
+connections:
+  indi_host: "192.168.100.14"
+  indi_port: 7624
+  mount_host: "192.168.100.73"
+  mount_port: 3490
+
+indi:
+  mount:
+    park_property: "10micron.TELESCOPE_PARK.PARK"
+    park_setting: "On"
+    coord_ra_property: "10micron.EQUATORIAL_EOD_COORD.RA"
+    coord_dec_property: "10micron.EQUATORIAL_EOD_COORD.DEC"
+
+monitoring:
+  loop_sleep_seconds: 60
+  park_position:
+    # Expected park position based on actual mount park position
+    ra: 18.42   # RA in hours (0-24) - actual park position
+    dec: 40.08  # DEC in degrees - actual park position
+    # Maximum allowed drift in degrees/hours
+    max_offset: 1.0
+
+timeouts:
+  indi_command: 5
+  mount_command: 5
+  mount_park: 60
+
+alerting:
+  # Send Mattermost alert every N seconds when corrections fail
+  mattermost_interval_seconds: 60
