@@ -17,10 +17,11 @@ indi:
 monitoring:
   loop_sleep_seconds: 60
   park_position:
-    # Expected park position based on actual mount park position
-    ra: 18.42   # RA in hours (0-24) - actual park position
-    dec: 40.08  # DEC in degrees - actual park position
-    # Maximum allowed drift in degrees/hours
+    # Expected park position based on actual mount park position (ALT/AZ coordinates)
+    # ALT/AZ coordinates are fixed to horizon and don't change with sidereal time
+    alt: 1.982   # Altitude in degrees - actual park position (+01:58:55.6)  
+    az: 359.747  # Azimuth in degrees - actual park position (359:44:52.1)
+    # Maximum allowed drift in degrees
     max_offset: 1.0
 
 timeouts:

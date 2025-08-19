@@ -374,6 +374,9 @@ class MountPositionMonitor:
             except Exception as e:
                 self.logger.error(f"[{timestamp}] Monitoring cycle failed: {e}")
                 
+            # Add blank line for readability between cycles
+            self.logger.info("")
+                
             # Calculate sleep time to maintain 60-second intervals
             elapsed = time.time() - start_time
             sleep_time = max(0, loop_sleep - elapsed)
@@ -404,99 +407,100 @@ class MountPositionMonitor:
             self.attempt_park_correction()
             return
             
-        # Step 3: Get position data from both sources
-        mount_ra = self.mount_api.send_command("#:GR#")
-        mount_dec = self.mount_api.send_command("#:GD#")
+        # Step 3: Get position data from mount API (ALT/AZ coordinates)
+        mount_alt = self.mount_api.send_command("#:GA#")
+        mount_az = self.mount_api.send_command("#:GZ#")
         
-        indi_ra_property = self.config.get('indi.mount.coord_ra_property')
-        indi_dec_property = self.config.get('indi.mount.coord_dec_property')
+        # Note: INDI doesn't expose ALT/AZ coordinates as properties for 10micron mounts
+        # so we only use the mount API for position verification
         
-        indi_ra = self.indi.get_property(indi_ra_property) if indi_ra_property else None
-        indi_dec = self.indi.get_property(indi_dec_property) if indi_dec_property else None
+        self.logger.info(f"[{timestamp}] Mount API position - ALT: {mount_alt}, AZ: {mount_az}")
         
-        self.logger.info(f"[{timestamp}] Mount API position - RA: {mount_ra}, DEC: {mount_dec}")
-        self.logger.info(f"[{timestamp}] INDI position - RA: {indi_ra}, DEC: {indi_dec}")
-        
-        # Step 4: Check for position drift
-        if self.check_position_drift(mount_ra, mount_dec, timestamp):
+        # Step 4: Check for position drift using ALT/AZ coordinates
+        if self.check_position_drift(mount_alt, mount_az, timestamp):
             self.attempt_park_correction()
         else:
             self.logger.info(f"[{timestamp}] Mount position is within acceptable tolerance")
             self.consecutive_failures = 0  # Reset failure counter on success
     
-    def check_position_drift(self, ra, dec, timestamp):
-        """Check if mount position has drifted from park position"""
+    def check_position_drift(self, alt, az, timestamp):
+        """Check if mount position has drifted from park position using ALT/AZ coordinates"""
         try:
-            expected_ra = self.config.get('monitoring.park_position.ra')
-            expected_dec = self.config.get('monitoring.park_position.dec')
+            expected_alt = self.config.get('monitoring.park_position.alt')
+            expected_az = self.config.get('monitoring.park_position.az')
             max_offset = self.config.get('monitoring.park_position.max_offset', 1.0)
             
-            if not expected_dec or not dec:
-                self.logger.warning(f"[{timestamp}] Cannot check drift - missing DEC data")
+            if not expected_alt or not alt:
+                self.logger.warning(f"[{timestamp}] Cannot check drift - missing ALT data")
                 return False
                 
-            # Parse DEC from mount (Ultra Precision format: +DD:MM:SS.SS#)
-            dec_cleaned = dec.replace('#', '').strip()
+            # Parse ALT from mount (Ultra Precision format: +DD:MM:SS.SS# or fallback +DD*MM#)
+            alt_cleaned = alt.replace('#', '').strip()
             try:
-                # Handle both formats: +DD:MM:SS.SS or +DD*MM (fallback)
-                if ':' in dec_cleaned:
+                if ':' in alt_cleaned:
                     # Ultra precision format: +DD:MM:SS.SS
-                    parts = dec_cleaned.replace('+', '').replace('-', '').split(':')
+                    parts = alt_cleaned.replace('+', '').replace('-', '').split(':')
                     deg = float(parts[0])
                     min_val = float(parts[1]) if len(parts) > 1 else 0
                     sec = float(parts[2]) if len(parts) > 2 else 0
-                    dec_degrees = deg + min_val/60 + sec/3600
-                    if dec_cleaned.startswith('-'):
-                        dec_degrees = -dec_degrees
-                elif '*' in dec_cleaned:
+                    alt_degrees = deg + min_val/60 + sec/3600
+                    if alt_cleaned.startswith('-'):
+                        alt_degrees = -alt_degrees
+                elif '*' in alt_cleaned:
                     # Fallback format: +DD*MM
-                    parts = dec_cleaned.replace('+', '').replace('-', '').split('*')
+                    parts = alt_cleaned.replace('+', '').replace('-', '').split('*')
                     deg = float(parts[0])
                     min_val = float(parts[1]) if len(parts) > 1 else 0
-                    dec_degrees = deg + min_val/60
-                    if dec_cleaned.startswith('-'):
-                        dec_degrees = -dec_degrees
+                    alt_degrees = deg + min_val/60
+                    if alt_cleaned.startswith('-'):
+                        alt_degrees = -alt_degrees
                 else:
                     # Simple decimal degrees
-                    dec_degrees = float(dec_cleaned)
+                    alt_degrees = float(alt_cleaned)
             except:
-                self.logger.error(f"[{timestamp}] Failed to parse DEC: {dec}")
+                self.logger.error(f"[{timestamp}] Failed to parse ALT: {alt}")
                 return False
                 
-            dec_drift = abs(dec_degrees - float(expected_dec))
+            alt_drift = abs(alt_degrees - float(expected_alt))
             
-            # Check RA drift if available
-            ra_drift = 0
-            if expected_ra and ra:
-                ra_cleaned = ra.replace('#', '').strip()
+            # Parse AZ from mount
+            az_drift = 0
+            if expected_az and az:
+                az_cleaned = az.replace('#', '').strip()
                 try:
-                    # Parse RA (Ultra Precision format: HH:MM:SS.SS)
-                    if ':' in ra_cleaned:
-                        parts = ra_cleaned.split(':')
-                        hours = float(parts[0])
+                    if ':' in az_cleaned:
+                        # Ultra precision format: DDD:MM:SS.SS
+                        parts = az_cleaned.split(':')
+                        deg = float(parts[0])
                         min_val = float(parts[1]) if len(parts) > 1 else 0
                         sec = float(parts[2]) if len(parts) > 2 else 0
-                        ra_hours = hours + min_val/60 + sec/3600
+                        az_degrees = deg + min_val/60 + sec/3600
+                    elif '*' in az_cleaned:
+                        # Fallback format: DDD*MM
+                        parts = az_cleaned.split('*')
+                        deg = float(parts[0])
+                        min_val = float(parts[1]) if len(parts) > 1 else 0
+                        az_degrees = deg + min_val/60
                     else:
-                        # Simple decimal hours
-                        ra_hours = float(ra_cleaned)
+                        # Simple decimal degrees
+                        az_degrees = float(az_cleaned)
                     
-                    ra_drift = abs(ra_hours - float(expected_ra))
-                    # Handle RA wraparound (0-24 hours)
-                    if ra_drift > 12:
-                        ra_drift = 24 - ra_drift
+                    az_drift = abs(az_degrees - float(expected_az))
+                    # Handle AZ wraparound (0-360 degrees)
+                    if az_drift > 180:
+                        az_drift = 360 - az_drift
                 except:
-                    self.logger.error(f"[{timestamp}] Failed to parse RA: {ra}")
-                    ra_drift = 0
+                    self.logger.error(f"[{timestamp}] Failed to parse AZ: {az}")
+                    az_drift = 0
             
-            total_drift = max(dec_drift, ra_drift)
+            total_drift = max(alt_drift, az_drift)
             
-            self.logger.info(f"[{timestamp}] Position drift check - Expected RA: {expected_ra}, Actual: {ra}")
-            self.logger.info(f"[{timestamp}] Position drift check - Expected DEC: {expected_dec}, Actual: {dec_degrees}")
-            self.logger.info(f"[{timestamp}] Drift - RA: {ra_drift}, DEC: {dec_drift}, Max: {total_drift}")
+            self.logger.info(f"[{timestamp}] Position drift check - Expected ALT: {expected_alt}, Actual: {alt}")
+            self.logger.info(f"[{timestamp}] Position drift check - Expected AZ: {expected_az}, Actual: {az}")
+            self.logger.info(f"[{timestamp}] Drift - ALT: {alt_drift}°, AZ: {az_drift}°, Max: {total_drift}°")
             
             if total_drift > max_offset:
-                self.logger.warning(f"[{timestamp}] Position drift detected: {total_drift} degrees (threshold: {max_offset})")
+                self.logger.warning(f"[{timestamp}] Position drift detected: {total_drift}° (threshold: {max_offset}°)")
                 return True
                 
             return False
@@ -556,10 +560,10 @@ class MountPositionMonitor:
             self.logger.warning(f"[{timestamp}] Park verification failed - mount status: {mount_status}")
             return False
             
-        # Check position
-        mount_ra = self.mount_api.send_command("#:GR#")
-        mount_dec = self.mount_api.send_command("#:GD#")
-        if not self.check_position_drift(mount_ra, mount_dec, timestamp):
+        # Check position using ALT/AZ coordinates
+        mount_alt = self.mount_api.send_command("#:GA#")
+        mount_az = self.mount_api.send_command("#:GZ#")
+        if not self.check_position_drift(mount_alt, mount_az, timestamp):
             return True
             
         return False
