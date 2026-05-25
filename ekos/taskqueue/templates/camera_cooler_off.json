@@ -1,0 +1,29 @@
+{
+    "category": "Camera",
+    "device_type": "CCD",
+    "version": "1.0",
+    "templates": [
+        {
+            "id": "camera_cooler_off",
+            "name": "Cooler/Fan Off",
+            "description": "Switch the TEC cooler (and fan) off via CCD_COOLER.COOLER_OFF. Warm the sensor with a ramp beforehand to avoid thermal shock.",
+            "version": "1.0",
+            "category": "Camera",
+            "supported_interfaces": [
+                2
+            ],
+            "parameters": [],
+            "actions": [
+                {
+                    "type": "SET",
+                    "property": "CCD_COOLER",
+                    "element": "COOLER_OFF",
+                    "value": true,
+                    "timeout": 30,
+                    "retries": 2,
+                    "failure_action": 1
+                }
+            ]
+        }
+    ]
+}

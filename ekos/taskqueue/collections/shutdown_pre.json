@@ -1,0 +1,47 @@
+{
+    "name": "Roll-off Roof Shutdown (pre-Ekos-stop)",
+    "description": "Runs before the Ekos profile stops. ORDER IS SAFETY-CRITICAL: park the mount before closing the roof. mount_park and dome_park abort the queue on failure (failure_action 0) so the roof never closes over an unparked mount. Then gently warm the sensor (ramp to a target above ambient), wait for the ramp, and switch the cooler/fan off.",
+    "version": "1.0",
+    "tasks": [
+        {
+            "template_id": "mount_park",
+            "device": "",
+            "failure_action": 0,
+            "parameters": {
+                "wait_timeout": 60
+            }
+        },
+        {
+            "template_id": "dome_park",
+            "device": "",
+            "failure_action": 0,
+            "parameters": {
+                "wait_timeout": 120
+            }
+        },
+        {
+            "template_id": "camera_setpoint",
+            "device": "ZWO CCD ASI2600MM Pro",
+            "failure_action": 1,
+            "parameters": {
+                "target_temperature": 40,
+                "ramp_slope": 5,
+                "ramp_threshold": 0.2
+            }
+        },
+        {
+            "template_id": "delay",
+            "device": "",
+            "failure_action": 1,
+            "parameters": {
+                "delay_seconds": 600
+            }
+        },
+        {
+            "template_id": "camera_cooler_off",
+            "device": "ZWO CCD ASI2600MM Pro",
+            "failure_action": 1,
+            "parameters": {}
+        }
+    ]
+}

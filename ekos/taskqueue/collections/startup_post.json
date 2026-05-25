@@ -1,0 +1,23 @@
+{
+    "name": "Roll-off Roof Startup (post-Ekos)",
+    "description": "Runs after the Ekos profile has started. ORDER IS SAFETY-CRITICAL: open the roof before the mount can move. dome_unpark aborts the queue on failure (failure_action 0) so the mount is never unparked under a closed roof.",
+    "version": "1.0",
+    "tasks": [
+        {
+            "template_id": "dome_unpark",
+            "device": "",
+            "failure_action": 0,
+            "parameters": {
+                "wait_timeout": 120
+            }
+        },
+        {
+            "template_id": "mount_unpark",
+            "device": "",
+            "failure_action": 0,
+            "parameters": {
+                "wait_timeout": 60
+            }
+        }
+    ]
+}

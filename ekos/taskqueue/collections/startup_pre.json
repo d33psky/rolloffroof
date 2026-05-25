@@ -1,0 +1,17 @@
+{
+    "name": "Roll-off Roof Startup (pre-Ekos)",
+    "description": "Runs before the Ekos profile starts (devices are already connected via the standalone indiserver). Begins cooling the main camera as early as possible; the Capture module waits for the setpoint before exposures.",
+    "version": "1.0",
+    "tasks": [
+        {
+            "template_id": "camera_setpoint",
+            "device": "ZWO CCD ASI2600MM Pro",
+            "failure_action": 1,
+            "parameters": {
+                "target_temperature": -10,
+                "ramp_slope": 3,
+                "ramp_threshold": 0.2
+            }
+        }
+    ]
+}

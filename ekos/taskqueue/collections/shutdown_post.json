@@ -1,0 +1,16 @@
+{
+    "name": "Roll-off Roof Shutdown (post-Ekos-stop)",
+    "description": "Runs after the Ekos profile has stopped. Posts the end-of-session status to Mattermost via the existing script.",
+    "version": "1.0",
+    "tasks": [
+        {
+            "template_id": "script_execute",
+            "device": "",
+            "failure_action": 1,
+            "parameters": {
+                "script_path": "/home/hans/obsy_shutdown_after.py",
+                "timeout": 300
+            }
+        }
+    ]
+}

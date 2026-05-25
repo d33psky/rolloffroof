@@ -1,0 +1,78 @@
+{
+    "category": "Camera",
+    "device_type": "CCD",
+    "version": "1.0",
+    "templates": [
+        {
+            "id": "camera_setpoint",
+            "name": "Set Camera Setpoint (no wait)",
+            "description": "Set the temperature ramp and target, then return immediately. Cooling: choose a target below ambient. Warming/idle: a target above ambient drives TEC power to 0. The Capture module performs any wait-for-setpoint before exposures.",
+            "version": "1.0",
+            "category": "Camera",
+            "supported_interfaces": [
+                2
+            ],
+            "parameters": [
+                {
+                    "name": "target_temperature",
+                    "type": "number",
+                    "default": -10,
+                    "min": -50,
+                    "max": 50,
+                    "step": 1,
+                    "unit": "°C",
+                    "description": "Target temperature"
+                },
+                {
+                    "name": "ramp_slope",
+                    "type": "number",
+                    "default": 3,
+                    "min": 0,
+                    "max": 30,
+                    "step": 1,
+                    "unit": "°C/min",
+                    "description": "Maximum temperature change rate"
+                },
+                {
+                    "name": "ramp_threshold",
+                    "type": "number",
+                    "default": 0.2,
+                    "min": 0.1,
+                    "max": 2.0,
+                    "step": 0.1,
+                    "unit": "°C",
+                    "description": "Temperature threshold for ramp control"
+                }
+            ],
+            "actions": [
+                {
+                    "type": "SET",
+                    "property": "CCD_TEMP_RAMP",
+                    "element": "RAMP_SLOPE",
+                    "value": "${ramp_slope}",
+                    "timeout": 30,
+                    "retries": 2,
+                    "failure_action": 1
+                },
+                {
+                    "type": "SET",
+                    "property": "CCD_TEMP_RAMP",
+                    "element": "RAMP_THRESHOLD",
+                    "value": "${ramp_threshold}",
+                    "timeout": 30,
+                    "retries": 2,
+                    "failure_action": 1
+                },
+                {
+                    "type": "SET",
+                    "property": "CCD_TEMPERATURE",
+                    "element": "CCD_TEMPERATURE_VALUE",
+                    "value": "${target_temperature}",
+                    "timeout": 30,
+                    "retries": 2,
+                    "failure_action": 0
+                }
+            ]
+        }
+    ]
+}
