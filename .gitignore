@@ -34,3 +34,18 @@
 .project
 .pydevproject
 .idea
+
+# Python cache directories
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache/
+
+# symlink
+ekos/ekos_sentinel_config.yaml
+
+# test data
+typescript
