@@ -54,9 +54,7 @@ class SentinelConfig:
             # Try to find a default config file
             script_dir = os.path.dirname(os.path.abspath(__file__))
             default_configs = [
-                os.path.join(script_dir, "ekos_sentinel_config.yaml"),
-                os.path.join(script_dir, "ekos_sentinel_config_production.yaml"),
-                os.path.join(script_dir, "ekos_sentinel_config_simulator.yaml")
+                os.path.join(script_dir, "ekos_sentinel_config.yaml")
             ]
             
             for config_path in default_configs:
