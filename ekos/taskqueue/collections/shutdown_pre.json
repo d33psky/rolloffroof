@@ -4,6 +4,15 @@
     "version": "1.0",
     "tasks": [
         {
+            "template_id": "script_execute",
+            "device": "",
+            "failure_action": 1,
+            "parameters": {
+                "script_path": "/home/hans/src/rolloffroof/bin/obsy-report-shutdown-pre-start",
+                "timeout": 30
+            }
+        },
+        {
             "template_id": "mount_park",
             "device": "",
             "failure_action": 0,

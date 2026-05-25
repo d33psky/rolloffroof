@@ -18,6 +18,15 @@
             "parameters": {
                 "wait_timeout": 60
             }
+        },
+        {
+            "template_id": "script_execute",
+            "device": "",
+            "failure_action": 1,
+            "parameters": {
+                "script_path": "/home/hans/src/rolloffroof/bin/obsy-report-startup-post-end",
+                "timeout": 30
+            }
         }
     ]
 }

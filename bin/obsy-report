@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+#
+# obsy-report - one-shot Mattermost status reporter for the Ekos task queues.
+#
+# Invoked from script_execute tasks in the startup/shutdown collections. The
+# script_execute template passes no arguments, so the *phase* is encoded in the
+# invocation name (argv[0]) via per-phase symlinks (busybox pattern):
+#
+#   obsy-report-startup-pre-start   -> obsy-report   (first task of startup_pre)
+#   obsy-report-startup-post-end    -> obsy-report   (last  task of startup_post)
+#   obsy-report-shutdown-pre-start  -> obsy-report   (first task of shutdown_pre)
+#   obsy-report-shutdown-post-end   -> obsy-report   (last  task of shutdown_post)
+#
+# Each phase maps to a fixed (severity, message). The report is appended to
+# /home/hans/roof.log and posted to Mattermost via the webhook URL in
+# ~/.mattermosturl (the mechanism already used by obsy_shutdown_after.py).
+#
+# When vostro is later folded into runme, the post step collapses to a
+# `dispatch-alert --source obsy --severity <sev> --title <message>` call
+# (sections/infra/dispatch_alert.sh) for email fallback + a JSON audit log.
+#
+# Arguments: none (phase comes from argv[0]).
+# Exit code: always 0 - a reporting hiccup must never abort the queue
+#            (the collections also set failure_action 1 on these tasks).
+
+import json
+import logging
+import os
+import sys
+from pathlib import Path
+
+import requests
+
+# phase (argv[0] suffix after "obsy-report-") -> (severity, message)
+PHASES = {
+    "startup-pre-start": (
+        "info", "Startup begun — cooling camera to −10 °C"),
+    "startup-post-end": (
+        "info", "Startup complete — roof open, mount unparked, ready to image"),
+    "shutdown-pre-start": (
+        "info", "Shutdown begun — parking mount, closing roof, warming camera"),
+    "shutdown-post-end": (
+        "info", "Shutdown complete — session ended"),
+}
+
+
+def send_to_mattermost(url, message):
+    payload = {"text": message}
+    r = requests.post(url, data={"payload": json.dumps(payload, sort_keys=True, indent=4)})
+    if r.status_code != 200:
+        raise RuntimeError("mattermost POST returned HTTP {}: {}".format(
+            r.status_code, r.text[:200]))
+
+
+def main():
+    logging.basicConfig(
+        filename="/home/hans/roof.log",
+        format="%(asctime)s,%(msecs)d %(levelname)-8s "
+               "[%(name)s %(filename)s:%(lineno)d] %(message)s",
+        datefmt="%Y-%m-%d:%H:%M:%S",
+        level=logging.DEBUG)
+    logger = logging.getLogger("obsy-report")
+
+    invoked = os.path.basename(sys.argv[0])
+    phase = invoked[len("obsy-report-"):] if invoked.startswith("obsy-report-") else ""
+    sev, message = PHASES.get(phase, ("warn", "Unknown phase: {}".format(invoked)))
+
+    logger.info("[%s] %s", sev, message)
+
+    home = str(Path.home())
+    try:
+        with open(home + "/.mattermosturl") as f:
+            url = f.read().rstrip("\n")
+        send_to_mattermost(url, message)
+    except (OSError, requests.RequestException, RuntimeError) as e:
+        logger.error("Mattermost post failed: %s", e)
+
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

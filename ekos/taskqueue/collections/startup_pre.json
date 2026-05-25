@@ -4,6 +4,15 @@
     "version": "1.0",
     "tasks": [
         {
+            "template_id": "script_execute",
+            "device": "",
+            "failure_action": 1,
+            "parameters": {
+                "script_path": "/home/hans/src/rolloffroof/bin/obsy-report-startup-pre-start",
+                "timeout": 30
+            }
+        },
+        {
             "template_id": "camera_setpoint",
             "device": "ZWO CCD ASI2600MM Pro",
             "failure_action": 1,
