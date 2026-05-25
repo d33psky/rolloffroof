@@ -3,9 +3,9 @@
 DESCRIPTION = """
 EKOS Sentinel, version 2.0 - Automated observatory safety system with configuration support.
 
-Originally created because EKOS scheduler in KStars 3.2.0 waits for good weather before 
-opening the observatory, but does not close down when weather gets bad. While newer KStars 
-versions may have improved this, this script ensures proper safety shutdown regardless of 
+Originally created because EKOS scheduler in KStars 3.2.0 waits for good weather before
+opening the observatory, but does not close down when weather gets bad. While newer KStars
+versions may have improved this, this script ensures proper safety shutdown regardless of
 KStars version and prevents future regressions.
 
 Main loop:
@@ -25,7 +25,7 @@ Configuration:
     Uses YAML configuration files for hardware setup:
     - ekos_sentinel_config_production.yaml (real observatory hardware)
     - ekos_sentinel_config_simulator.yaml (INDI simulators for testing)
-    
+
     Specify config with --config parameter or place in same directory.
 """
 
@@ -47,7 +47,7 @@ from ekos_cli import EkosDbus
 class SentinelConfig:
     def __init__(self, config_file=None):
         self.config = self.load_config(config_file)
-        
+
     def load_config(self, config_file):
         """Load configuration from YAML file"""
         if config_file is None:
@@ -56,38 +56,38 @@ class SentinelConfig:
             default_configs = [
                 os.path.join(script_dir, "ekos_sentinel_config.yaml")
             ]
-            
+
             for config_path in default_configs:
                 if os.path.exists(config_path):
                     config_file = config_path
                     break
-            
+
             if config_file is None:
                 raise FileNotFoundError("No configuration file found. Please specify --config or create ekos_sentinel_config.yaml")
-        
+
         if not os.path.exists(config_file):
             raise FileNotFoundError(f"Configuration file not found: {config_file}")
-            
+
         with open(config_file, 'r') as f:
             config = yaml.safe_load(f)
-            
+
         print(f"Loaded configuration from: {config_file}")
         if 'description' in config:
             print(f"Description: {config['description']}")
-            
+
         return config
-    
+
     def get(self, key_path, default=None):
         """Get configuration value using dot notation (e.g., 'indi.mount.park_property')"""
         keys = key_path.split('.')
         value = self.config
-        
+
         for key in keys:
             if isinstance(value, dict) and key in value:
                 value = value[key]
             else:
                 return default
-                
+
         return value
 
 
@@ -127,11 +127,11 @@ class BasicIndi():
         weather_property = self.config.get('indi.weather.property')
         weather_ok_setting = self.config.get('indi.weather.ok_setting')
         weather_stations = self.config.get('indi.weather.station_indexes', [1])
-        
+
         if not weather_property:
             self.logger.warning("No weather property configured - assuming safe weather")
             return True
-            
+
         safe = 0
         for station in weather_stations:
             cmd = "indi_getprop -h {host} -1 '{property}_{station}'".format(
@@ -158,11 +158,11 @@ class BasicIndi():
     def get_roof_safety(self, indi_command_timeout):
         dome_property = self.config.get('indi.dome.park_property')
         dome_park_setting = self.config.get('indi.dome.park_setting')
-        
+
         if not dome_property:
             self.logger.warning("No dome property configured - assuming roof is safe")
             return True
-            
+
         cmd = "indi_getprop -h {host} -1 '{property}'".format(host=self.host, property=dome_property)
         ws = self._run(cmd, indi_command_timeout)
         if not ws:
@@ -177,11 +177,11 @@ class BasicIndi():
     def get_cap_safety(self, indi_command_timeout):
         cap_property = self.config.get('indi.cap.property')
         cap_setting = self.config.get('indi.cap.setting')
-        
+
         if not cap_property:
             self.logger.debug("get_cap_safety fakes True because no cap property is configured")
             return True
-            
+
         cmd = "indi_getprop -h {host} -1 '{property}'".format(host=self.host, property=cap_property)
         ws = self._run(cmd, indi_command_timeout)
         if not ws:
@@ -201,11 +201,11 @@ class BasicIndi():
         mount_coord_property = self.config.get('indi.mount.coord_dec_property')
         mount_park_position = self.config.get('indi.mount.coord_dec_park_position')
         mount_max_offset = self.config.get('indi.mount.coord_dec_max_offset')
-        
+
         if not mount_park_property:
             self.logger.warning("No mount park property configured - assuming mount is safe")
             return True
-            
+
         # multiple steps
         # 1) Mount park property must be in park setting
         cmd = "indi_getprop -h {host} -1 '{property}'".format(host=self.host, property=mount_park_property)
@@ -216,7 +216,7 @@ class BasicIndi():
         self.logger.debug("{} {} {}".format(__class__, cmd, ws.stdout.rstrip()))
         if ws.stdout.rstrip() != mount_park_setting:
             return False
-            
+
         # 2) Mount tracking must be off
         if mount_track_property:
             cmd = "indi_getprop -h {host} -1 '{property}'".format(host=self.host, property=mount_track_property)
@@ -227,7 +227,7 @@ class BasicIndi():
             self.logger.debug("{} {} {}".format(__class__, cmd, ws.stdout.rstrip()))
             if ws.stdout.rstrip() != mount_track_setting:
                 return False
-                
+
         # 3) Mount position must be within offset of park position
         if mount_coord_property and mount_park_position and mount_max_offset:
             cmd = "indi_getprop -h {host} -1 '{property}'".format(host=self.host, property=mount_coord_property)
@@ -238,7 +238,7 @@ class BasicIndi():
             self.logger.debug("{} {} {}".format(__class__, cmd, ws.stdout.rstrip()))
             if abs(float(ws.stdout.rstrip())) - abs(float(mount_park_position)) > float(mount_max_offset):
                 return False
-                
+
         return True
 
     def park_mount(self, indi_command_timeout, mount_park_timeout):
@@ -252,7 +252,7 @@ class BasicIndi():
     def _park_mount(self, indi_command_timeout, mount_park_timeout):
         mount_park_property = self.config.get('indi.mount.park_property')
         mount_park_setting = self.config.get('indi.mount.park_setting')
-        
+
         cmd = "indi_setprop -h {host} '{property}={setting}'".format(host=self.host, property=mount_park_property,
                                                                      setting=mount_park_setting)
         ws = self._run(cmd, indi_command_timeout)
@@ -285,7 +285,7 @@ class BasicIndi():
     def _close_cap(self, indi_command_timeout, cap_close_timeout):
         cap_property = self.config.get('indi.cap.property')
         cap_setting = self.config.get('indi.cap.setting')
-        
+
         cmd = "indi_setprop -h {host} '{property}={setting}'".format(host=self.host, property=cap_property,
                                                                      setting=cap_setting)
         ws = self._run(cmd, indi_command_timeout)
@@ -314,7 +314,7 @@ class BasicIndi():
     def _close_roof(self, indi_command_timeout, roof_close_timeout):
         dome_property = self.config.get('indi.dome.park_property')
         dome_setting = self.config.get('indi.dome.park_setting')
-        
+
         cmd = "indi_setprop -h {host} '{property}={setting}'".format(host=self.host, property=dome_property,
                                                                      setting=dome_setting)
         ws = self._run(cmd, indi_command_timeout)
@@ -347,7 +347,7 @@ class BasicIndi():
     def _warm_camera(self, indi_command_timeout):
         camera_property = self.config.get('indi.camera.cooler_property')
         camera_setting = self.config.get('indi.camera.cooler_setting')
-        
+
         cmd = "indi_setprop -h {host} '{property}={setting}'".format(host=self.host,
                                                                      property=camera_property,
                                                                      setting=camera_setting)
@@ -402,7 +402,7 @@ def main():
 
     # Load configuration
     config = SentinelConfig(args.config)
-    
+
     ekos_dbus = EkosDbus()
     basic_indi = BasicIndi(host=args.indi_host, config=config)
 
@@ -460,7 +460,7 @@ def main():
                 looping = False
             weather_safety_status = basic_indi.get_weather_safety(indi_command_timeout=config.get('timeouts.indi_command', 5))
             roof_safety_status = basic_indi.get_roof_safety(indi_command_timeout=config.get('timeouts.indi_command', 5))
-            
+
             if weather_safety_status is None or roof_safety_status is None:
                 sleep_time = config.get('safety.main_loop_sleep_seconds', 60)
                 logger.error('Failed to get safety status from INDI server - INDI server may be down. Will retry in {} seconds.'.format(sleep_time))
@@ -468,7 +468,7 @@ def main():
                     logger.debug("sleep {}".format(sleep_time))
                     time.sleep(sleep_time)
                 continue
-                
+
             if weather_safety_status:
                 if roof_safety_status:
                     logger.info('weather is safe, roof is closed, but we do not start ekos scheduler')
@@ -491,7 +491,7 @@ def main():
                         logger.info('Stopped ekos scheduler')
                     except Exception as e:
                         logger.error('Failed to stop ekos scheduler: {}'.format(e))
-                    
+
                     # Stop all active imaging operations (capture, focus, align, guide)
                     try:
                         success = ekos_dbus.abort_all_operations()
@@ -501,7 +501,7 @@ def main():
                             logger.warning('Some ekos operations failed to abort - see previous messages')
                     except Exception as e:
                         logger.error('Failed to abort ekos operations: {}'.format(e))
-                    
+
                     # Now proceed with hardware safety actions
 
                     logger.warning('park mount')
@@ -539,3 +539,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

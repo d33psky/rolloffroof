@@ -7,7 +7,7 @@ indi:
     property: "Weather Simulator.WEATHER_STATUS.STATION_STATUS"
     ok_setting: "Ok"
     station_indexes: [1]
-  
+
   mount:
     park_property: "Telescope Simulator.TELESCOPE_PARK.PARK"
     park_setting: "On"
@@ -16,15 +16,15 @@ indi:
     coord_dec_property: "Telescope Simulator.EQUATORIAL_EOD_COORD.DEC"
     coord_dec_park_position: "0"  # Simulator starts at 0
     coord_dec_max_offset: "1"
-  
+
   dome:
     park_property: "Dome Simulator.DOME_PARK.PARK"
     park_setting: "On"
-  
+
   camera:
     cooler_property: "CCD Simulator.CCD_COOLER.COOLER_OFF"
     cooler_setting: "On"
-  
+
   cap:
     property: null  # No dust cap simulator
     setting: null
@@ -39,3 +39,4 @@ safety:
   unsafe_count_max: 2  # Faster response for testing
   main_loop_sleep_seconds: 10  # More frequent checks for testing
   max_retries: 1
+

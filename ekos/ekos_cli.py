@@ -196,32 +196,32 @@ class EkosDbus():
     def abort_all_operations(self):
         print("Abort all Ekos operations")
         success = True
-        
+
         # Try to abort each module, but don't fail if one is not available
         try:
             self.abort_capture()
         except Exception as e:
             print(f"Failed to abort capture: {e}")
             success = False
-            
+
         try:
             self.abort_focus()
         except Exception as e:
             print(f"Failed to abort focus: {e}")
             success = False
-            
+
         try:
             self.abort_align()
         except Exception as e:
             print(f"Failed to abort align: {e}")
             success = False
-            
+
         try:
             self.abort_guide()
         except Exception as e:
             print(f"Failed to abort guide: {e}")
             success = False
-            
+
         return success
 
 
