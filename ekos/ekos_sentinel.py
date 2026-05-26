@@ -236,7 +236,12 @@ class BasicIndi():
                 self.logger.critical("get_mount_safety failed at step 3")
                 return False
             self.logger.debug("{} {} {}".format(__class__, cmd, ws.stdout.rstrip()))
-            if abs(float(ws.stdout.rstrip())) - abs(float(mount_park_position)) > float(mount_max_offset):
+            # Angular distance between the current DEC and the park DEC.
+            # (Was abs(current) - abs(park), which wrongly passed for any DEC
+            # closer to 0 than the park position — e.g. a target at +5 deg vs
+            # park +39 read as "parked", so park_mount returned success while
+            # the mount was still slewing. See incident 2026-05-26.)
+            if abs(float(ws.stdout.rstrip()) - float(mount_park_position)) > float(mount_max_offset):
                 return False
 
         return True

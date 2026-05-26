@@ -10,19 +10,32 @@ indi:
   mount:
     park_property: "10micron.TELESCOPE_PARK.PARK"
     park_setting: "On"
+    unpark_property: "10micron.TELESCOPE_PARK.UNPARK"
+    unpark_setting: "On"
     track_state_property: "10micron.TELESCOPE_TRACK_STATE.TRACK_ON"
     track_state_setting: "Off"
     coord_dec_property: "10micron.EQUATORIAL_EOD_COORD.DEC"
     coord_dec_park_position: "39"
     coord_dec_max_offset: "1"
+    # Optional 10Micron LX200 enhancement (INDI-bypass). Presence of lx200.host
+    # enables Gstat==5 as the definitive confirm at the close-roof precondition
+    # and as a fallback when INDI is unreachable. Generic/public users omit this
+    # whole block and run pure INDI.
+    lx200:
+      host: "192.168.100.73"
+      port: 3490
+      gstat_parked: "5#"
 
   dome:
     park_property: "Dome Scripting Gateway.DOME_PARK.PARK"
     park_setting: "On"
 
   camera:
+    device: "ZWO CCD ASI2600MM Pro"
     cooler_property: "ZWO CCD ASI2600MM Pro.CCD_COOLER.COOLER_OFF"
     cooler_setting: "On"
+    cooler_power_property: "ZWO CCD ASI2600MM Pro.CCD_COOLER_POWER.CCD_COOLER_VALUE"
+    temperature_property: "ZWO CCD ASI2600MM Pro.CCD_TEMPERATURE.CCD_TEMPERATURE_VALUE"
 
   cap:
     property: null  # No dust cap in production setup
@@ -37,5 +50,5 @@ timeouts:
 safety:
   unsafe_count_max: 3
   main_loop_sleep_seconds: 60
-  max_retries: 1
+  max_retries: 5
 
