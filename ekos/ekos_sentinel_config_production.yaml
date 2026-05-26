@@ -29,6 +29,8 @@ indi:
   dome:
     park_property: "Dome Scripting Gateway.DOME_PARK.PARK"
     park_setting: "On"
+    unpark_property: "Dome Scripting Gateway.DOME_PARK.UNPARK"
+    unpark_setting: "On"
 
   camera:
     device: "ZWO CCD ASI2600MM Pro"
