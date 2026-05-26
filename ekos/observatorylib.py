@@ -566,17 +566,32 @@ class Observatory:
                 time.sleep(self.retry_delay)
         return False
 
-    def warm_camera(self, target_c, slope_c_per_min=5, ramp_threshold=0.2):
-        """Start a gentle warm ramp to a target above ambient (drives TEC to 0).
-        Fire-and-set: the wait for the setpoint is the caller's concern."""
+    def set_camera_setpoint(self, target_c, slope_c_per_min=5, ramp_threshold=0.2):
+        """Set the temperature ramp + target and return immediately (fire-and-set).
+        Used for cooling (target below ambient) and warming (target above ambient,
+        which drives TEC power toward 0). Waiting is the caller's concern."""
         dev = self.config.get("indi.camera.device")
         if not dev:
-            self.logger.debug("no camera device configured - skipping warm")
+            self.logger.debug("no camera device configured - skipping setpoint")
             return True
         ok = self.indi_set("{}.CCD_TEMP_RAMP.RAMP_SLOPE".format(dev), slope_c_per_min)
         ok &= self.indi_set("{}.CCD_TEMP_RAMP.RAMP_THRESHOLD".format(dev), ramp_threshold)
         ok &= self.indi_set("{}.CCD_TEMPERATURE.CCD_TEMPERATURE_VALUE".format(dev), target_c)
         return ok
+
+    def camera_temperature(self):
+        prop = self.config.get("indi.camera.temperature_property")
+        if not prop:
+            return None
+        v = self.indi_get(prop)
+        try:
+            return float(v) if v is not None else None
+        except ValueError:
+            return None
+
+    def wait_camera_warm(self, threshold_c, timeout):
+        """Poll until the sensor has warmed to >= threshold_c, or timeout."""
+        return self._wait_until(lambda: (self.camera_temperature() or -999) >= threshold_c, timeout)
 
     def state_snapshot(self):
         """Live readings for state-aware reports."""

@@ -51,4 +51,14 @@ safety:
   unsafe_count_max: 3
   main_loop_sleep_seconds: 60
   max_retries: 5
+  retry_delay: 5
+
+# Tunables for the observatory-open / observatory-close sequence scripts.
+sequence:
+  cool_target: -10     # camera setpoint at startup (deg C)
+  cool_slope: 3        # deg C / min
+  warm_target: 40      # camera setpoint at shutdown (above ambient -> TEC to 0)
+  warm_slope: 5
+  warm_threshold: 5    # consider the sensor "warm enough" to cut the TEC at this temp
+  warm_timeout: 600    # but don't wait longer than this before cooler-off
 

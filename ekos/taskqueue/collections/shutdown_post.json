@@ -1,6 +1,6 @@
 {
     "name": "Roll-off Roof Shutdown (post-Ekos-stop)",
-    "description": "Runs after the Ekos profile has stopped. Posts the end-of-session status to Mattermost via the unified obsy-report reporter (argv[0] dispatch).",
+    "description": "Calls observatory-close-post: finish warming, cooler off (verified), and report the real end state. Runs even if the pre queue aborted, so the cooler is never stranded.",
     "version": "1.0",
     "tasks": [
         {
@@ -8,8 +8,8 @@
             "device": "",
             "failure_action": 1,
             "parameters": {
-                "script_path": "/home/hans/src/rolloffroof/bin/obsy-report-shutdown-post-end",
-                "timeout": 30
+                "script_path": "/home/hans/src/rolloffroof/ekos/observatory-close-post",
+                "timeout": 900
             }
         }
     ]

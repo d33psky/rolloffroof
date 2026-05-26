@@ -1,6 +1,6 @@
 {
     "name": "Roll-off Roof Startup (pre-Ekos)",
-    "description": "Runs before the Ekos profile starts (devices are already connected via the standalone indiserver). Begins cooling the main camera as early as possible; the Capture module waits for the setpoint before exposures.",
+    "description": "Calls observatory-open-pre: begins cooling the camera. All logic lives in the script + observatorylib (shared with ekos_sentinel).",
     "version": "1.0",
     "tasks": [
         {
@@ -8,18 +8,8 @@
             "device": "",
             "failure_action": 1,
             "parameters": {
-                "script_path": "/home/hans/src/rolloffroof/bin/obsy-report-startup-pre-start",
-                "timeout": 30
-            }
-        },
-        {
-            "template_id": "camera_setpoint",
-            "device": "ZWO CCD ASI2600MM Pro",
-            "failure_action": 1,
-            "parameters": {
-                "target_temperature": -10,
-                "ramp_slope": 3,
-                "ramp_threshold": 0.2
+                "script_path": "/home/hans/src/rolloffroof/ekos/observatory-open-pre",
+                "timeout": 60
             }
         }
     ]

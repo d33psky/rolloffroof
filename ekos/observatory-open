@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""
+observatory-open - Ekos scheduler startup sequence for the roll-off roof.
+
+Invoked via per-phase symlinks (busybox argv[0] dispatch):
+  observatory-open-pre   - before Ekos connects: begin cooling the camera
+  observatory-open-post  - after Ekos connects: open roof, THEN unpark mount
+
+All hardware logic is shared with ekos_sentinel via observatorylib. Coordinates
+with the always-on sentinel through the heartbeat Lease + emergency flag:
+  * holds the "open" lease while driving hardware (sentinel defers);
+  * aborts if the sentinel raises the emergency flag (close beats open).
+
+Exit 0 on success, non-zero if a step failed (already reported to Mattermost).
+"""
+
+import logging
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import observatorylib as obs
+
+CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "ekos_sentinel_config_production.yaml")
+
+
+def do_pre(o, cfg):
+    """Begin cooling as early as possible; the Capture module waits for the
+    setpoint before exposing. Fire-and-forget so cooling overlaps the rest."""
+    target = cfg.get("sequence.cool_target", -10)
+    o.report("info", "Startup: cooling camera to {} C".format(target))
+    o.set_camera_setpoint(target, cfg.get("sequence.cool_slope", 3))
+    return 0
+
+
+def do_post(o):
+    """ORDER IS SAFETY-CRITICAL: open the roof before the mount can move."""
+    if obs.is_emergency():
+        o.report("warn", "Startup aborted: emergency raised before opening roof")
+        return 1
+    if not o.open_roof():
+        o.report("critical", "Startup FAILED: roof did not open; NOT unparking mount",
+                 state=o.state_snapshot())
+        return 1
+    if obs.is_emergency():
+        o.report("warn", "Startup aborted: emergency raised before unparking mount")
+        return 1
+    if not o.unpark_mount():
+        o.report("critical", "Startup: roof open but mount FAILED to unpark",
+                 state=o.state_snapshot())
+        return 1
+    o.report("info", "Startup complete: roof open, mount unparked, ready to image",
+             state=o.state_snapshot())
+    return 0
+
+
+def main():
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    phase = os.path.basename(sys.argv[0]).replace("observatory-open-", "")
+    cfg = obs.ObservatoryConfig(CONFIG)
+    o = obs.Observatory(cfg.get("connections.indi_host", "localhost"), cfg)
+
+    if phase not in ("pre", "post"):
+        o.report("warn", "observatory-open: unknown phase '{}'".format(phase))
+        sys.exit(2)
+
+    try:
+        with obs.Lease("open"):
+            rc = do_pre(o, cfg) if phase == "pre" else do_post(o)
+    except obs.LeaseBusy:
+        # Another actor (almost certainly the sentinel doing an emergency close)
+        # holds the observatory - do not fight it.
+        o.report("warn", "Startup deferred: observatory lease held by another actor")
+        rc = 1
+    sys.exit(rc)
+
+
+if __name__ == "__main__":
+    main()

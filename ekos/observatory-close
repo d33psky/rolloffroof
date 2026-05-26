@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""
+observatory-close - Ekos scheduler shutdown sequence for the roll-off roof.
+
+Invoked via per-phase symlinks (busybox argv[0] dispatch):
+  observatory-close-pre   - before Ekos stops: park mount, start warming, close roof
+  observatory-close-post  - after Ekos stops: finish warming, cooler off, final report
+
+All hardware logic is shared with ekos_sentinel via observatorylib.
+
+Two lessons from incident 2026-05-26 are baked in:
+  * The "close" lease is taken at ENTRY, so the always-on sentinel can see the
+    scheduler is handling the close (its "did Ekos do its job?" signal) and
+    defer. If the sentinel already holds it, we step aside (it is closing).
+  * Cooler-off lives in POST, which runs even if PRE aborted - so a failed
+    park/close can never again strand the cooler at the cold setpoint.
+
+PRE reports intent+result; POST reports the *verified* end state (parked, roof
+closed, cooler off) - never just "session ended".
+"""
+
+import logging
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import observatorylib as obs
+
+CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "ekos_sentinel_config_production.yaml")
+
+
+def do_pre(o, cfg):
+    """ORDER IS SAFETY-CRITICAL: park the mount before closing the roof.
+    close_roof() refuses unless the mount is confirmed parked (Gstat==5 when
+    LX200 is enabled), which is also when the mount releases its lock."""
+    o.report("info", "Shutdown: parking mount, warming camera, closing roof")
+    if not o.park_mount():
+        o.report("critical", "Shutdown FAILED: mount did not park; NOT closing roof",
+                 state=o.state_snapshot())
+        return 1
+    # Start the warm ramp now so it overlaps the roof close (does not block it).
+    o.set_camera_setpoint(cfg.get("sequence.warm_target", 40),
+                          cfg.get("sequence.warm_slope", 5))
+    if not o.close_roof():
+        o.report("critical", "Shutdown FAILED: mount parked but roof did NOT close",
+                 state=o.state_snapshot())
+        return 1
+    o.report("info", "Shutdown pre done: mount parked, roof closed, camera warming",
+             state=o.state_snapshot())
+    return 0
+
+
+def do_post(o, cfg):
+    """Runs regardless of PRE's outcome. Wait for the sensor to warm, then cut
+    the TEC (verified), and report the real end state."""
+    o.wait_camera_warm(cfg.get("sequence.warm_threshold", 5),
+                       cfg.get("sequence.warm_timeout", 600))
+    cooled = o.cooler_off()
+    st = o.state_snapshot()
+    safe = bool(st.get("parked")) and bool(st.get("roof_closed"))
+    if safe and cooled:
+        o.report("info", "Shutdown complete: mount parked, roof closed, cooler off", state=st)
+        return 0
+    o.report("critical", "Shutdown INCOMPLETE - human check needed", state=st)
+    return 1
+
+
+def main():
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    phase = os.path.basename(sys.argv[0]).replace("observatory-close-", "")
+    cfg = obs.ObservatoryConfig(CONFIG)
+    o = obs.Observatory(cfg.get("connections.indi_host", "localhost"), cfg)
+
+    if phase not in ("pre", "post"):
+        o.report("warn", "observatory-close: unknown phase '{}'".format(phase))
+        sys.exit(2)
+
+    try:
+        with obs.Lease("close"):
+            rc = do_pre(o, cfg) if phase == "pre" else do_post(o, cfg)
+    except obs.LeaseBusy:
+        # The sentinel (or another actor) already holds the observatory and is
+        # closing - that is fine, not an error.
+        o.report("info", "Shutdown deferred: another actor (sentinel?) holds the lease")
+        rc = 0
+    sys.exit(rc)
+
+
+if __name__ == "__main__":
+    main()
