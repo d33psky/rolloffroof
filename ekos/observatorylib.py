@@ -56,6 +56,7 @@ logger = logging.getLogger("observatory")
 RUN_DIR = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "observatory")
 LEASE_PATH = os.path.join(RUN_DIR, "lease")
 EMERGENCY_PATH = os.path.join(RUN_DIR, "emergency")
+SHUTDOWN_MARK_PATH = os.path.join(RUN_DIR, "shutdown_complete")
 DEFAULT_LEASE_TTL = 90  # seconds; lease older than this is considered stale
 
 
@@ -88,27 +89,41 @@ SEVERITY_EMOJI = {"info": ":information_source:", "warn": ":warning:", "critical
 
 
 class Reporter:
-    """Posts to Mattermost via the webhook URL in ~/.mattermosturl.
+    """Posts one-line alerts to Mattermost via an incoming-webhook URL.
 
-    Mirrors the long-standing obsy_shutdown_after.py mechanism so no new infra
-    is needed on vostro. When vostro is folded into runme this collapses to a
-    dispatch-alert call (email fallback + JSON audit log)."""
+    URL is read from `url_file` (default: ~/.mattermosturl-observatory, falling
+    back to ~/.mattermosturl). Messages are ONE-LINERS. For actionable severities
+    (warn/critical) an optional `mention` (e.g. "@hans") is prepended so a channel
+    set to "notify on mentions only" pushes to the phone, while info stays silent.
+    `mention` defaults to None so the generic/public case leaks no handle.
 
-    def __init__(self, url_file=None, source="observatory"):
-        self.url_file = url_file or os.path.join(str(Path.home()), ".mattermosturl")
+    Note (learned 2026-05-27): Mattermost only pushes/emails when you are AWAY;
+    while you are online it shows in-app only. And webhook-posted @mentions DO
+    notify. So info=silent / warn+critical=@mention gives the desired behaviour."""
+
+    def __init__(self, url_file=None, mention=None, mention_severities=("warn", "critical"),
+                 source="observatory"):
+        home = str(Path.home())
+        if url_file:
+            self.url_file = url_file
+        else:
+            preferred = os.path.join(home, ".mattermosturl-observatory")
+            self.url_file = preferred if os.path.exists(preferred) else os.path.join(home, ".mattermosturl")
+        self.mention = mention
+        self.mention_severities = set(mention_severities)
         self.source = source
         self.logger = logging.getLogger("observatory.report")
 
     def report(self, severity, title, body=None, state=None):
-        """severity in {info,warn,critical}. state is an optional dict of live
-        readings (parked, roof, cooler_power, ...) appended to the message."""
-        lines = [title]
-        if body:
-            lines.append(body)
-        if state:
-            lines.append("```\n" + "\n".join(f"{k}: {v}" for k, v in state.items()) + "\n```")
-        text = "{} **[{}]** {}".format(SEVERITY_EMOJI.get(severity, ":warning:"),
-                                       self.source, "\n".join(lines))
+        """One-line Mattermost post. `severity` in {info,warn,critical}; warn/critical
+        get the mention prefix (if configured) to trigger a push. `state` is accepted
+        for backwards compatibility but NO LONGER rendered - keep it to one line, so
+        put anything important in the title."""
+        line = title if not body else "{} - {}".format(title, body)
+        if self.mention and severity in self.mention_severities:
+            line = "{} {}".format(self.mention, line)
+        text = "{} **[{}]** {}".format(SEVERITY_EMOJI.get(severity, ":information_source:"),
+                                       self.source, line)
         self.logger.info("report[%s] %s", severity, title)
         try:
             with open(self.url_file) as f:
@@ -123,9 +138,9 @@ class Reporter:
             return False
 
 
-def report(severity, title, body=None, state=None, source="observatory"):
+def report(severity, title, body=None, state=None, source="observatory", mention=None):
     """Module-level one-shot for external callers who don't build an Observatory."""
-    return Reporter(source=source).report(severity, title, body=body, state=state)
+    return Reporter(source=source, mention=mention).report(severity, title, body=body, state=state)
 
 
 # --------------------------------------------------------------------------
@@ -261,6 +276,32 @@ def is_emergency():
     return os.path.exists(EMERGENCY_PATH)
 
 
+def mark_shutdown_complete():
+    """Set by observatory-close once a shutdown is VERIFIED done. The Ekos 3.8.x
+    bug re-runs the shutdown procedure in a loop after a dawn abort; this marker
+    lets the close scripts no-op silently on every lap after the first instead of
+    re-doing the work and re-posting. Cleared by observatory-open next session."""
+    _ensure_dir_for(SHUTDOWN_MARK_PATH)
+    try:
+        with open(SHUTDOWN_MARK_PATH, "w") as f:
+            json.dump({"ts": time.time()}, f)
+    except OSError as e:
+        logger.error("cannot write shutdown marker: %s", e)
+
+
+def clear_shutdown_complete():
+    try:
+        os.remove(SHUTDOWN_MARK_PATH)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        logger.error("cannot clear shutdown marker: %s", e)
+
+
+def is_shutdown_complete():
+    return os.path.exists(SHUTDOWN_MARK_PATH)
+
+
 # --------------------------------------------------------------------------
 # Observatory: direct-INDI + LX200 hardware control
 # --------------------------------------------------------------------------
@@ -276,7 +317,11 @@ class Observatory:
         self.indi_host = config.get("connections.indi_host", indi_host)
         self.config = config
         self.dry_run = dry_run
-        self.reporter = reporter or Reporter()
+        self.reporter = reporter or Reporter(
+            url_file=config.get("report.url_file"),
+            mention=config.get("report.mention"),
+            source=config.get("report.source", "observatory"),
+        )
         self.logger = logging.getLogger("observatory")
 
         self.cmd_timeout = config.get("timeouts.indi_command", 5)

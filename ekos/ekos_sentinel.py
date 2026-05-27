@@ -59,23 +59,12 @@ logger = logging.getLogger("ekos_sentinel")
 # --------------------------------------------------------------------------
 # Helpers (module level so they are unit-testable)
 # --------------------------------------------------------------------------
-def safe_snapshot(o):
-    """state_snapshot for a report, but never let it crash the failsafe
-    (it touches the LX200 socket, which can fail)."""
-    try:
-        return o.state_snapshot()
-    except Exception as e:  # pragma: no cover - defensive
-        logger.error("state_snapshot failed: %s", e)
-        return None
-
-
 def alert(o, reason):
     """Was alert_and_abort(): report critical to Mattermost + log, but do NOT
     sys.exit. A failsafe daemon must stay alive and retry on the next cycle, so
     'abort' now means 'abort this emergency attempt', not 'kill the sentinel'."""
     logger.critical("ALERT: %s", reason)
-    o.report("critical", "ALERT (failsafe could not complete): " + reason,
-             state=safe_snapshot(o))
+    o.report("critical", "ALERT (failsafe could not complete): " + reason)
 
 
 def read_weather(o, config):
@@ -132,8 +121,7 @@ def failsafe_close(o, ekos_dbus, config, reason):
     emergency (DECISION 2). The scheduled close still does the full
     warm-then-cooler_off in its POST phase."""
     logger.warning("FAILSAFE close: %s", reason)
-    o.report("warn", "FAILSAFE: weather unsafe, roof open, Ekos not closing",
-             body=reason, state=safe_snapshot(o))
+    o.report("warn", "FAILSAFE: weather unsafe, roof open, Ekos not closing", body=reason)
 
     _safe_dbus("stop_scheduler", ekos_dbus.stop_scheduler)
     _safe_dbus("abort_all_operations", ekos_dbus.abort_all_operations)
@@ -153,8 +141,7 @@ def failsafe_close(o, ekos_dbus, config, reason):
         if not o.close_roof():
             alert(o, "mount parked but roof failed to close")
             return
-        o.report("warn", "FAILSAFE complete: mount parked, roof closed, camera warming",
-                 state=safe_snapshot(o))
+        o.report("warn", "FAILSAFE complete: mount parked, roof closed, camera warming")
     finally:
         lease.release()
 

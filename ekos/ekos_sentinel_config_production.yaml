@@ -64,3 +64,12 @@ sequence:
   warm_threshold: 5    # consider the sensor "warm enough" to cut the TEC at this temp
   warm_timeout: 600    # but don't wait longer than this before cooler-off
 
+# Mattermost alerting (observatorylib.Reporter). All messages go to one channel
+# (#observatory, webhook in ~/.mattermosturl-observatory); info is silent there,
+# warn/critical are prefixed with `mention` so the channel pushes to the phone.
+# `mention` is deployment-specific - generic/public users omit it (no handle).
+report:
+  mention: "@hans"
+  source: "observatory"
+  # url_file: ~/.mattermosturl-observatory   # default; falls back to ~/.mattermosturl
+

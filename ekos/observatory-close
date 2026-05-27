@@ -34,35 +34,43 @@ def do_pre(o, cfg):
     """ORDER IS SAFETY-CRITICAL: park the mount before closing the roof.
     close_roof() refuses unless the mount is confirmed parked (Gstat==5 when
     LX200 is enabled), which is also when the mount releases its lock."""
+    # Ekos 3.8.x re-runs the shutdown procedure in a loop after a dawn abort.
+    # If we are already shut down, no-op SILENTLY (no report) so the loop cannot
+    # re-clutter the channel. The first, real shutdown still reports normally.
+    if obs.is_shutdown_complete() or (o.is_parked() and o.is_roof_closed()):
+        logging.info("shutdown-pre: already shut down - silent no-op")
+        return 0
     o.report("info", "Shutdown: parking mount, warming camera, closing roof")
     if not o.park_mount():
-        o.report("critical", "Shutdown FAILED: mount did not park; NOT closing roof",
-                 state=o.state_snapshot())
+        o.report("critical", "Shutdown FAILED: mount did not park; NOT closing roof")
         return 1
     # Start the warm ramp now so it overlaps the roof close (does not block it).
     o.set_camera_setpoint(cfg.get("sequence.warm_target", 40),
                           cfg.get("sequence.warm_slope", 5))
     if not o.close_roof():
-        o.report("critical", "Shutdown FAILED: mount parked but roof did NOT close",
-                 state=o.state_snapshot())
+        o.report("critical", "Shutdown FAILED: mount parked but roof did NOT close")
         return 1
-    o.report("info", "Shutdown pre done: mount parked, roof closed, camera warming",
-             state=o.state_snapshot())
+    o.report("info", "Shutdown pre done: mount parked, roof closed, camera warming")
     return 0
 
 
 def do_post(o, cfg):
     """Runs regardless of PRE's outcome. Wait for the sensor to warm, then cut
     the TEC (verified), and report the real end state."""
+    # Same loop guard as pre: once a shutdown has been verified done this session,
+    # every subsequent re-run is a silent no-op (the cooler is already off).
+    if obs.is_shutdown_complete():
+        logging.info("shutdown-post: already completed this session - silent no-op")
+        return 0
     o.wait_camera_warm(cfg.get("sequence.warm_threshold", 5),
                        cfg.get("sequence.warm_timeout", 600))
     cooled = o.cooler_off()
-    st = o.state_snapshot()
-    safe = bool(st.get("parked")) and bool(st.get("roof_closed"))
+    safe = o.is_parked() and o.is_roof_closed()
     if safe and cooled:
-        o.report("info", "Shutdown complete: mount parked, roof closed, cooler off", state=st)
+        o.report("info", "Shutdown complete: mount parked, roof closed, cooler off")
+        obs.mark_shutdown_complete()   # silence the dawn re-run loop from here on
         return 0
-    o.report("critical", "Shutdown INCOMPLETE - human check needed", state=st)
+    o.report("critical", "Shutdown INCOMPLETE - human check needed")
     return 1
 
 
