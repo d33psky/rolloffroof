@@ -648,25 +648,48 @@ class Observatory:
                 time.sleep(self.retry_delay)
         return False
 
+    def cooler_is_on(self):
+        """True/False/None for the cooler ENABLE switch (CCD_COOLER.COOLER_ON).
+        The fan tracks THIS, not TEC power. It is a write-only switch invisible to
+        the default indi_getprop view, so it must be queried with -w. None = the
+        switch is unreadable (treat as 'unknown', never as a state)."""
+        prop = self.config.get("indi.camera.cooler_state_property")
+        if not prop:
+            return None
+        ws = self._run("indi_getprop -h {} -w -1 '{}'".format(self.indi_host, prop))
+        if not ws:
+            return None
+        out = ws.stdout.rstrip()
+        if out == "":
+            return None
+        return (out.split("=", 1)[-1] if "=" in out else out).strip() == "On"
+
     def cooler_off(self):
-        """Switch the TEC/fan off, then VERIFY via cooler power -> ~0 (the
-        COOLER_OFF switch reads blank, so power is the observable check)."""
+        """Durably stop the cooler/fan. The fan tracks CCD_COOLER.COOLER_ON, and the
+        INDI temperature-ramp loop (CCD::checkTemperatureTarget) re-enables it every
+        ~60s while RAMP_SLOPE>0 chases an unreachable warm target - overriding any bare
+        COOLER_OFF. So zero the ramp slope FIRST, then turn the cooler off, then verify
+        via the enable switch. (observatory-open rewrites the slope before the next
+        cool, so leaving the idle slope at 0 is harmless.)"""
         prop = self.config.get("indi.camera.cooler_property")
         setting = self.config.get("indi.camera.cooler_setting")
         if not prop:
             self.logger.debug("no cooler property configured - skipping")
             return True
-        self.connect_device(self.config.get("indi.camera.device"))   # on-demand (fan)
+        self.connect_device(self.config.get("indi.camera.device"))
+        slope_prop = self.config.get("indi.camera.ramp_slope_property")
         for attempt in range(1, self.max_retries + 1):
-            self.indi_set(prop, setting)
-            power = self.cooler_power()
-            if power is None:
-                self.logger.warning("cooler_off sent; cannot verify (no power property) - trusting")
+            if slope_prop:
+                self.indi_set(slope_prop, 0)     # stop the ramp loop re-enabling the cooler
+            self.indi_set(prop, setting)         # COOLER_OFF=On
+            on = self.cooler_is_on()
+            if on is False:
+                self.logger.info("cooler/fan off (verified COOLER_ON=Off)")
                 return True
-            if self._wait_until(lambda: (self.cooler_power() or 0) <= 1.0, 30):
-                self.logger.info("cooler off verified (power ~0%%)")
+            if on is None:
+                self.logger.warning("cooler_off sent; cannot verify (COOLER_ON unreadable) - trusting")
                 return True
-            self.logger.warning("cooler still drawing power (%.0f%%), retrying", power)
+            self.logger.warning("cooler still enabled after COOLER_OFF, retrying")
             if attempt < self.max_retries:
                 time.sleep(self.retry_delay)
         return False

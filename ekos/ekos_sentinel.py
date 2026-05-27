@@ -158,9 +158,43 @@ def failsafe_close(o, ekos_dbus, config, reason):
         lease.release()
 
 
+def guard_camera_fan(o, config, st):
+    """Keep the camera fan off while the observatory is idle. The fan tracks the
+    cooler ENABLE switch (CCD_COOLER.COOLER_ON), which the INDI temperature-ramp loop
+    re-enables; observatory-close normally disables it after the warm-up, but a
+    crash / restart / Ekos reconnect can leave it running. Called ONLY when the roof
+    is closed (imaging is impossible, so the cooler is never legitimately needed).
+
+    Worst-case timer: from when we first see the cooler on, wait sequence.warm_timeout
+    (the max warm-up duration) before forcing it off, so a genuine gentle warm-up in
+    progress is never cut short. Restart-safe by design - a fresh guard re-waits the
+    full timeout, so it can never truncate a real warm-up."""
+    on = o.cooler_is_on()
+    if on is not True:                      # off, or unreadable -> nothing to guard
+        st["cooler_on_since"] = None
+        return
+    now = time.time()
+    timeout = config.get("sequence.warm_timeout", 600)
+    if st.get("cooler_on_since") is None:
+        st["cooler_on_since"] = now
+        logger.info("camera cooler/fan on while roof closed - will disable after %ss (warm-up guard)",
+                    timeout)
+        return
+    elapsed = now - st["cooler_on_since"]
+    if elapsed >= timeout:
+        if o.cooler_off():
+            logger.info("camera cooler/fan disabled (idle, warm-up guard elapsed)")
+            st["cooler_on_since"] = None
+        else:
+            logger.warning("failed to disable camera cooler/fan - will retry next cycle")
+    else:
+        logger.debug("camera cooler/fan on (%.0f/%ss warm-up guard)", elapsed, timeout)
+
+
 def evaluate_cycle(o, ekos_dbus, config, st):
     """One decision cycle. `st` carries loop state {unsafe_count, hold_set,
-    indi_down, roof_unknown_since}. Extracted so the logic is unit-testable.
+    indi_down, roof_unknown_since, cooler_on_since}. Extracted so the logic is
+    unit-testable.
 
     Check the ROOF first - a closed roof needs no close and no debounce. The
     safety-proxy verdict (weather + UPS + darkness) then decides the 'do not open'
@@ -196,6 +230,7 @@ def evaluate_cycle(o, ekos_dbus, config, st):
     if roof is True:
         st["unsafe_count"] = 0
         st["roof_unknown_since"] = None
+        guard_camera_fan(o, config, st)   # idle: ensure the camera fan is not left on
         if safe:
             drop_hold()
             logger.info("safe, roof closed (opening allowed)")
@@ -205,6 +240,7 @@ def evaluate_cycle(o, ekos_dbus, config, st):
         return
 
     # Roof open or unknown.
+    st["cooler_on_since"] = None          # not idle -> reset the fan-guard timer
     if safe:
         st["unsafe_count"] = 0
         st["roof_unknown_since"] = None
@@ -321,7 +357,8 @@ def main():
         sys.exit(0)
 
     sleep_s = config.get("safety.main_loop_sleep_seconds", 60)
-    st = {"unsafe_count": 0, "hold_set": False, "indi_down": False, "roof_unknown_since": None}
+    st = {"unsafe_count": 0, "hold_set": False, "indi_down": False,
+          "roof_unknown_since": None, "cooler_on_since": None}
 
     looping = True
     while looping:

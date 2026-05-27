@@ -36,6 +36,8 @@ indi:
     device: "ZWO CCD ASI2600MM Pro"
     cooler_property: "ZWO CCD ASI2600MM Pro.CCD_COOLER.COOLER_OFF"
     cooler_setting: "On"
+    cooler_state_property: "ZWO CCD ASI2600MM Pro.CCD_COOLER.COOLER_ON"   # the cooler ENABLE switch (== fan); write-only, read via -w
+    ramp_slope_property: "ZWO CCD ASI2600MM Pro.CCD_TEMP_RAMP.RAMP_SLOPE" # zero it to stop the ramp loop re-enabling the cooler
     cooler_power_property: "ZWO CCD ASI2600MM Pro.CCD_COOLER_POWER.CCD_COOLER_VALUE"
     temperature_property: "ZWO CCD ASI2600MM Pro.CCD_TEMPERATURE.CCD_TEMPERATURE_VALUE"
 

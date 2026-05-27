@@ -21,9 +21,10 @@ def check(name, cond):
     print(("PASS " if cond else "FAIL ") + name); (PASS if cond else FAIL)[0] += 1
 
 class FakeO:
-    def __init__(self, weather="Ok", roof=True, parked=True, park_ok=True, close_ok=True):
+    def __init__(self, weather="Ok", roof=True, parked=True, park_ok=True, close_ok=True, cooler_on=False):
         self.weather = weather; self._roof = roof; self._parked = parked
         self.park_ok = park_ok; self.close_ok = close_ok; self.calls = []; self.max_retries = 5
+        self._cooler_on = cooler_on
     def ensure_devices_connected(self): self.calls.append(("ensure",)); return True
     def indi_get(self, prop): return self.weather
     def is_roof_closed(self): return self._roof          # True / False / None
@@ -32,6 +33,8 @@ class FakeO:
     def close_cap(self): self.calls.append(("close_cap",)); return True
     def close_roof(self): self.calls.append(("close_roof",)); return self.close_ok
     def set_camera_setpoint(self, t, s): self.calls.append(("set_camera_setpoint", t, s)); return True
+    def cooler_is_on(self): return self._cooler_on       # True / False / None
+    def cooler_off(self): self.calls.append(("cooler_off",)); self._cooler_on = False; return True
     def state_snapshot(self): return {"mount_parked": self._parked, "roof_closed": self._roof}
     def report(self, sev, title, body=None, state=None): self.calls.append(("report", sev, title))
     def names(self): return [c[0] for c in self.calls]
@@ -54,7 +57,8 @@ obs.read_lease = lambda *a, **k: _LEASE["val"]
 obs.lease_is_fresh = lambda lease, ttl=90: _LEASE["fresh"]
 
 def st0(**kw):
-    s = {"unsafe_count": 0, "hold_set": False, "indi_down": False, "roof_unknown_since": None}
+    s = {"unsafe_count": 0, "hold_set": False, "indi_down": False,
+         "roof_unknown_since": None, "cooler_on_since": None}
     s.update(kw); return s
 def reset(): HOLD["set"] = False; _LEASE["val"] = None; _LEASE["fresh"] = False
 
@@ -107,6 +111,24 @@ check("defer: no failsafe while Ekos close lease fresh", "park_mount" not in o.n
 reset(); o = FakeO(weather=None, roof=None); st = st0()
 S.evaluate_cycle(o, FakeDbus(), cfg, st)
 check("indi-down: marked down + no action", st["indi_down"] is True and "park_mount" not in o.names())
+
+# 9. fan guard: roof closed + cooler on -> arm timer, no cooler_off yet
+reset(); o = FakeO(weather="Ok", roof=True, cooler_on=True); st = st0()
+S.evaluate_cycle(o, FakeDbus(), cfg, st)
+check("fan guard: cooler on -> armed, no cooler_off yet", "cooler_off" not in o.names() and st["cooler_on_since"])
+
+# 10. fan guard: warm-up timeout elapsed -> cooler_off
+st["cooler_on_since"] = time.time() - (cfg.get("sequence.warm_timeout", 600) + 100)
+o2 = FakeO(weather="Ok", roof=True, cooler_on=True)
+S.evaluate_cycle(o2, FakeDbus(), cfg, st)
+check("fan guard: timeout elapsed -> cooler_off", "cooler_off" in o2.names() and st["cooler_on_since"] is None)
+
+# 11. fan guard: roof OPEN resets the timer, never disables the cooler (may be imaging)
+reset(); o = FakeO(weather="Ok", roof=False, cooler_on=True)
+st = st0(cooler_on_since=time.time() - 9999)
+S.evaluate_cycle(o, FakeDbus(), cfg, st)
+check("fan guard: roof open resets timer, no cooler_off",
+      "cooler_off" not in o.names() and st["cooler_on_since"] is None)
 
 print("\n{} passed, {} failed".format(PASS[0], FAIL[0]))
 sys.exit(1 if FAIL[0] else 0)
