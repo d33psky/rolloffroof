@@ -115,15 +115,19 @@ class Reporter:
         self.logger = logging.getLogger("observatory.report")
 
     def report(self, severity, title, body=None, state=None):
-        """One-line Mattermost post. `severity` in {info,warn,critical}; warn/critical
-        get the mention prefix (if configured) to trigger a push. `state` is accepted
-        for backwards compatibility but NO LONGER rendered - keep it to one line, so
-        put anything important in the title."""
+        """Mattermost post. `severity` in {info,warn,critical}; warn/critical get the
+        mention prefix (if configured) to trigger a push. The title line is a
+        one-liner; if `state` (a dict of live readings) is passed it is appended as a
+        compact code block. Use `state` on DIAGNOSTIC messages (failures, failsafe,
+        verified end-states) - NOT on routine progress - to keep the channel readable."""
         line = title if not body else "{} - {}".format(title, body)
         if self.mention and severity in self.mention_severities:
             line = "{} {}".format(self.mention, line)
-        text = "{} **[{}]** {}".format(SEVERITY_EMOJI.get(severity, ":information_source:"),
-                                       self.source, line)
+        parts = ["{} **[{}]** {}".format(SEVERITY_EMOJI.get(severity, ":information_source:"),
+                                         self.source, line)]
+        if state:
+            parts.append("```\n" + "\n".join("{}: {}".format(k, v) for k, v in state.items()) + "\n```")
+        text = "\n".join(parts)
         self.logger.info("report[%s] %s", severity, title)
         try:
             with open(self.url_file) as f:
@@ -375,6 +379,49 @@ class Observatory:
         ws = self._run("indi_setprop -h {} '{}={}'".format(self.indi_host, prop, value))
         return bool(ws) and ws.returncode == 0
 
+    # ---- device connection (Ekos-independent) ----
+    # A crashed/stopped Ekos leaves the standalone indiserver's drivers DISCONNECTED.
+    # The sentinel must reconnect them itself so it is never blinded by Ekos.
+    @staticmethod
+    def _device_of(prop):
+        """Device name (first dotted segment) of a property spec, or None."""
+        return prop.split(".")[0] if prop else None
+
+    def is_device_connected(self, device):
+        return self.indi_get("{}.CONNECTION.CONNECT".format(device)) == "On"
+
+    def connect_device(self, device, timeout=None):
+        """Idempotently connect an INDI device; True once CONNECT==On. Cheap no-op
+        when already connected."""
+        if not device or self.is_device_connected(device):
+            return True
+        self.logger.warning("INDI device '%s' disconnected - connecting", device)
+        self.indi_set("{}.CONNECTION.CONNECT".format(device), "On")
+        return self._wait_until(lambda: self.is_device_connected(device),
+                                timeout or self.config.get("timeouts.device_connect", 15))
+
+    def safety_devices(self):
+        """Devices the sentinel must keep connected to READ/ACT on safety: weather,
+        mount, dome, cap. NOT the camera - connecting it spins the fan, so the camera
+        is connected on-demand only when actually cooling/warming."""
+        devs = []
+        for key in ("indi.weather.property", "indi.mount.park_property",
+                    "indi.dome.park_property", "indi.cap.property"):
+            d = self._device_of(self.config.get(key))
+            if d and d not in devs:
+                devs.append(d)
+        return devs
+
+    def ensure_devices_connected(self):
+        """Connect every safety device that is disconnected. Returns True if all are
+        connected (False if some couldn't be, e.g. the indiserver itself is down)."""
+        ok = True
+        for d in self.safety_devices():
+            if not self.connect_device(d):
+                self.logger.error("could not connect INDI device '%s'", d)
+                ok = False
+        return ok
+
     # ---- mount LX200 (authoritative) ----
     def mount_lx200(self, command):
         """One-shot LX200 query to the mount (10Micron-specific INDI-bypass).
@@ -454,14 +501,22 @@ class Observatory:
         return (_parse_dms(self.mount_lx200("#:GA#")), _parse_dms(self.mount_lx200("#:GZ#")))
 
     def is_roof_closed(self):
+        """True=closed, False=positively open, None=UNKNOWN (dome unreadable).
+        Callers MUST treat None as 'don't know' - never as open or closed. An
+        absent INDI value means a disconnected/in-transition device, not a state."""
         val = self.indi_get(self.config.get("indi.dome.park_property"))
+        if val is None:
+            return None
         return val == self.config.get("indi.dome.park_setting")
 
     def is_cap_closed(self):
         prop = self.config.get("indi.cap.property")
         if not prop:
             return True  # no cap configured -> treated as closed/safe
-        return self.indi_get(prop) == self.config.get("indi.cap.setting")
+        val = self.indi_get(prop)
+        if val is None:
+            return None  # unknown
+        return val == self.config.get("indi.cap.setting")
 
     def is_weather_safe(self):
         prop = self.config.get("indi.weather.property")
@@ -531,7 +586,7 @@ class Observatory:
         return False
 
     def close_roof(self):
-        if self.is_roof_closed():
+        if self.is_roof_closed() is True:
             self.logger.info("roof already closed")
             return True
         # SAFETY precondition: never close over a mount that is not fully parked.
@@ -546,7 +601,7 @@ class Observatory:
         for attempt in range(1, self.max_retries + 1):
             self.logger.warning("close roof (attempt %d/%d)", attempt, self.max_retries)
             self.indi_set(prop, setting)                 # RE-ISSUE each attempt
-            if self._wait_until(self.is_roof_closed, self.roof_close_timeout):
+            if self._wait_until(lambda: self.is_roof_closed() is True, self.roof_close_timeout):
                 self.logger.info("roof closed")
                 return True
             # If a transient race recurred, re-confirm the mount is still parked
@@ -559,7 +614,7 @@ class Observatory:
         return False
 
     def open_roof(self):
-        if not self.is_roof_closed():
+        if self.is_roof_closed() is False:
             self.logger.info("roof already open")
             return True
         prop = self.config.get("indi.dome.unpark_property",
@@ -568,7 +623,7 @@ class Observatory:
         for attempt in range(1, self.max_retries + 1):
             self.logger.warning("open roof (attempt %d/%d)", attempt, self.max_retries)
             self.indi_set(prop, unpark)
-            if self._wait_until(lambda: not self.is_roof_closed(), self.roof_close_timeout):
+            if self._wait_until(lambda: self.is_roof_closed() is False, self.roof_close_timeout):
                 return True
             if attempt < self.max_retries:
                 time.sleep(self.retry_delay)
@@ -583,7 +638,7 @@ class Observatory:
         for attempt in range(1, self.max_retries + 1):
             self.logger.warning("close cap (attempt %d/%d)", attempt, self.max_retries)
             self.indi_set(prop, setting)
-            if self._wait_until(self.is_cap_closed, self.cap_close_timeout):
+            if self._wait_until(lambda: self.is_cap_closed() is True, self.cap_close_timeout):
                 return True
             if attempt < self.max_retries:
                 time.sleep(self.retry_delay)
@@ -597,6 +652,7 @@ class Observatory:
         if not prop:
             self.logger.debug("no cooler property configured - skipping")
             return True
+        self.connect_device(self.config.get("indi.camera.device"))   # on-demand (fan)
         for attempt in range(1, self.max_retries + 1):
             self.indi_set(prop, setting)
             power = self.cooler_power()
@@ -619,6 +675,7 @@ class Observatory:
         if not dev:
             self.logger.debug("no camera device configured - skipping setpoint")
             return True
+        self.connect_device(dev)   # camera connected on-demand (spins the fan) only when cooling/warming
         ok = self.indi_set("{}.CCD_TEMP_RAMP.RAMP_SLOPE".format(dev), slope_c_per_min)
         ok &= self.indi_set("{}.CCD_TEMP_RAMP.RAMP_THRESHOLD".format(dev), ramp_threshold)
         ok &= self.indi_set("{}.CCD_TEMPERATURE.CCD_TEMPERATURE_VALUE".format(dev), target_c)
@@ -641,7 +698,7 @@ class Observatory:
     def state_snapshot(self):
         """Live readings for state-aware reports."""
         alt, az = self.mount_altaz()
-        return {"parked": self.is_parked(), "roof_closed": self.is_roof_closed(),
+        return {"mount_parked": self.is_parked(), "roof_closed": self.is_roof_closed(),
                 "weather_safe": self.is_weather_safe(), "cooler_power": self.cooler_power(),
                 "alt": alt, "az": az}
 

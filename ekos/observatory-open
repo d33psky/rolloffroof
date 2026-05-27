@@ -40,15 +40,18 @@ def do_post(o):
         o.report("warn", "Startup aborted: emergency raised before opening roof")
         return 1
     if not o.open_roof():
-        o.report("critical", "Startup FAILED: roof did not open; NOT unparking mount")
+        o.report("critical", "Startup FAILED: roof did not open; NOT unparking mount",
+                 state=o.state_snapshot())
         return 1
     if obs.is_emergency():
         o.report("warn", "Startup aborted: emergency raised before unparking mount")
         return 1
     if not o.unpark_mount():
-        o.report("critical", "Startup: roof open but mount FAILED to unpark")
+        o.report("critical", "Startup: roof open but mount FAILED to unpark",
+                 state=o.state_snapshot())
         return 1
-    o.report("info", "Startup complete: roof open, mount unparked, ready to image")
+    o.report("info", "Startup complete: roof open, mount unparked, ready to image",
+             state=o.state_snapshot())
     return 0
 
 
@@ -63,6 +66,7 @@ def main():
         o.report("warn", "observatory-open: unknown phase '{}'".format(phase))
         sys.exit(2)
 
+    o.ensure_devices_connected()        # do not depend on Ekos to connect devices
     # New session: re-arm shutdown reporting (clears the dawn-loop no-op marker).
     obs.clear_shutdown_complete()
 

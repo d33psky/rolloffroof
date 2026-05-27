@@ -59,12 +59,22 @@ logger = logging.getLogger("ekos_sentinel")
 # --------------------------------------------------------------------------
 # Helpers (module level so they are unit-testable)
 # --------------------------------------------------------------------------
+def safe_snapshot(o):
+    """state_snapshot for a diagnostic report; never let it crash the failsafe
+    (it touches the LX200 socket, which can fail)."""
+    try:
+        return o.state_snapshot()
+    except Exception as e:  # pragma: no cover - defensive
+        logger.error("state_snapshot failed: %s", e)
+        return None
+
+
 def alert(o, reason):
     """Was alert_and_abort(): report critical to Mattermost + log, but do NOT
     sys.exit. A failsafe daemon must stay alive and retry on the next cycle, so
     'abort' now means 'abort this emergency attempt', not 'kill the sentinel'."""
     logger.critical("ALERT: %s", reason)
-    o.report("critical", "ALERT (failsafe could not complete): " + reason)
+    o.report("critical", "ALERT (failsafe could not complete): " + reason, state=safe_snapshot(o))
 
 
 def read_weather(o, config):
@@ -121,7 +131,7 @@ def failsafe_close(o, ekos_dbus, config, reason):
     emergency (DECISION 2). The scheduled close still does the full
     warm-then-cooler_off in its POST phase."""
     logger.warning("FAILSAFE close: %s", reason)
-    o.report("warn", "FAILSAFE: weather unsafe, roof open, Ekos not closing", body=reason)
+    o.report("warn", "FAILSAFE: weather unsafe, roof open, Ekos not closing", body=reason, state=safe_snapshot(o))
 
     _safe_dbus("stop_scheduler", ekos_dbus.stop_scheduler)
     _safe_dbus("abort_all_operations", ekos_dbus.abort_all_operations)
@@ -141,17 +151,20 @@ def failsafe_close(o, ekos_dbus, config, reason):
         if not o.close_roof():
             alert(o, "mount parked but roof failed to close")
             return
-        o.report("warn", "FAILSAFE complete: mount parked, roof closed, camera warming")
+        o.report("warn", "FAILSAFE complete: mount parked, roof closed, camera warming", state=safe_snapshot(o))
     finally:
         lease.release()
 
 
 def evaluate_cycle(o, ekos_dbus, config, st):
     """One decision cycle. `st` is a mutable dict carrying loop state
-    {unsafe_count, emergency_raised, indi_down}. Extracted from the loop so the
-    decision logic can be tested without sleeping."""
-    reachable, weather_safe = read_weather(o, config)
+    {unsafe_count, emergency_raised, indi_down, roof_unknown_since}. Extracted from
+    the loop so the decision logic can be tested without sleeping."""
+    # Keep our own INDI devices connected - the sentinel must NEVER depend on Ekos
+    # for connectivity (a crashed/stopped Ekos leaves the drivers disconnected).
+    o.ensure_devices_connected()
 
+    reachable, weather_safe = read_weather(o, config)
     if not reachable:
         if not st["indi_down"]:
             o.report("warn", "INDI unreachable - sentinel cannot read observatory state")
@@ -162,19 +175,15 @@ def evaluate_cycle(o, ekos_dbus, config, st):
         o.report("info", "INDI reachable again")
         st["indi_down"] = False
 
-    roof_closed = o.is_roof_closed()
-
     if weather_safe:
         st["unsafe_count"] = 0
+        st["roof_unknown_since"] = None
         if st["emergency_raised"] or obs.is_emergency():
             obs.clear_emergency()
             st["emergency_raised"] = False
             o.report("info", "weather recovered - emergency cleared")
-        if roof_closed:
-            logger.info("weather safe, roof closed (idle; not starting scheduler)")
-            # ekos_dbus.start_scheduler()  # multi-night autonomy: postponed
-        else:
-            logger.info("weather safe, roof open (imaging or opening)")
+        roof = o.is_roof_closed()
+        logger.info("weather safe, roof %s", {True: "closed", False: "open"}.get(roof, "unknown"))
         return
 
     # weather unsafe -> debounce before believing it
@@ -185,14 +194,32 @@ def evaluate_cycle(o, ekos_dbus, config, st):
                     st["unsafe_count"], unsafe_max)
         return
 
-    # confirmed unsafe: forbid opening; close if the roof is open
+    # confirmed unsafe: forbid opening; close if the roof is (or is assumed) open
     if not st["emergency_raised"]:
         obs.set_emergency("weather unsafe (confirmed {}x)".format(st["unsafe_count"]))
         st["emergency_raised"] = True
 
-    if roof_closed:
+    roof = o.is_roof_closed()   # True=closed / False=positively open / None=unknown
+    if roof is True:
+        st["roof_unknown_since"] = None
         logger.info("weather unsafe but roof already closed - safe")
-    elif scheduler_is_closing():
+        return
+    if roof is None:
+        # Absent reading means 'don't know', NOT open. But a roof that stays unknown
+        # longer than its max open/close time is itself a problem -> assume OPEN.
+        now = time.time()
+        st["roof_unknown_since"] = st["roof_unknown_since"] or now
+        elapsed = now - st["roof_unknown_since"]
+        timeout = config.get("safety.roof_unknown_timeout", 120)
+        if elapsed < timeout:
+            logger.warning("weather unsafe + roof state UNKNOWN (%.0f/%ss) - waiting, not acting yet",
+                           elapsed, timeout)
+            return
+        logger.warning("weather unsafe + roof UNKNOWN for %.0fs (>%ss) - assuming OPEN and acting",
+                       elapsed, timeout)
+    # roof positively open, or unknown for too long
+    st["roof_unknown_since"] = None
+    if scheduler_is_closing():
         logger.warning("weather unsafe + roof open, but Ekos shutdown is in "
                        "progress (close lease held) - standing by")
     else:
@@ -276,7 +303,7 @@ def main():
         sys.exit(0)
 
     sleep_s = config.get("safety.main_loop_sleep_seconds", 60)
-    st = {"unsafe_count": 0, "emergency_raised": False, "indi_down": False}
+    st = {"unsafe_count": 0, "emergency_raised": False, "indi_down": False, "roof_unknown_since": None}
 
     looping = True
     while looping:

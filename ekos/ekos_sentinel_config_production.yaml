@@ -48,12 +48,14 @@ timeouts:
   mount_park: 60
   roof_close: 60
   cap_close: 60
+  device_connect: 15   # how long to wait for an INDI device to come up after CONNECT=On
 
 safety:
   unsafe_count_max: 3
   main_loop_sleep_seconds: 60
   max_retries: 5
   retry_delay: 5
+  roof_unknown_timeout: 120   # if the roof reads UNKNOWN longer than this (max open/close time), assume OPEN and act
 
 # Tunables for the observatory-open / observatory-close sequence scripts.
 sequence:
