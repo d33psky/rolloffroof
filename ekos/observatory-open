@@ -7,9 +7,9 @@ Invoked via per-phase symlinks (busybox argv[0] dispatch):
   observatory-open-post  - after Ekos connects: open roof, THEN unpark mount
 
 All hardware logic is shared with ekos_sentinel via observatorylib. Coordinates
-with the always-on sentinel through the heartbeat Lease + emergency flag:
+with the always-on sentinel through the heartbeat Lease + safety hold:
   * holds the "open" lease while driving hardware (sentinel defers);
-  * aborts if the sentinel raises the emergency flag (close beats open).
+  * aborts if the sentinel set the safety hold (close beats open).
 
 Exit 0 on success, non-zero if a step failed (already reported to Mattermost).
 """
@@ -36,15 +36,15 @@ def do_pre(o, cfg):
 
 def do_post(o):
     """ORDER IS SAFETY-CRITICAL: open the roof before the mount can move."""
-    if obs.is_emergency():
-        o.report("warn", "Startup aborted: emergency raised before opening roof")
+    if obs.is_safety_hold():
+        o.report("warn", "Startup aborted: safety hold set before opening roof")
         return 1
     if not o.open_roof():
         o.report("critical", "Startup FAILED: roof did not open; NOT unparking mount",
                  state=o.state_snapshot())
         return 1
-    if obs.is_emergency():
-        o.report("warn", "Startup aborted: emergency raised before unparking mount")
+    if obs.is_safety_hold():
+        o.report("warn", "Startup aborted: safety hold set before unparking mount")
         return 1
     if not o.unpark_mount():
         o.report("critical", "Startup: roof open but mount FAILED to unpark",

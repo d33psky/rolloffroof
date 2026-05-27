@@ -25,8 +25,9 @@ Design rules (learned from incident 2026-05-26):
 Coordination (race guard) primitives also live here:
   * Lease  - heartbeat advisory mutex at /run/observatory/lease, steal-on-stale.
              Held only while an actor is actively driving hardware.
-  * Emergency flag at /run/observatory/emergency - sentinel-owned; sequence
-    scripts poll it between steps and abort so safety (close) beats open.
+  * Safety hold at /run/observatory/safety_hold - sentinel-owned, set when the
+    safety proxy (weather + UPS + darkness) says unsafe; sequence scripts poll it
+    and abort opening (close beats open). A 'do not open' gate, not an emergency.
 
 Reporting is folded in (state-aware Mattermost) and also exposed standalone:
   obs.report(...)              # instance, carries config + live state
@@ -55,7 +56,7 @@ logger = logging.getLogger("observatory")
 # it without root; falls back to /tmp if XDG_RUNTIME_DIR isn't set.
 RUN_DIR = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "observatory")
 LEASE_PATH = os.path.join(RUN_DIR, "lease")
-EMERGENCY_PATH = os.path.join(RUN_DIR, "emergency")
+SAFETY_HOLD_PATH = os.path.join(RUN_DIR, "safety_hold")
 SHUTDOWN_MARK_PATH = os.path.join(RUN_DIR, "shutdown_complete")
 DEFAULT_LEASE_TTL = 90  # seconds; lease older than this is considered stale
 
@@ -148,7 +149,7 @@ def report(severity, title, body=None, state=None, source="observatory", mention
 
 
 # --------------------------------------------------------------------------
-# Race-guard primitives: heartbeat lease + emergency flag
+# Race-guard primitives: heartbeat lease + safety hold
 # --------------------------------------------------------------------------
 def _ensure_dir_for(path):
     d = os.path.dirname(path)
@@ -253,31 +254,34 @@ class Lease:
         return False
 
 
-def set_emergency(reason):
-    """Sentinel-owned: raise the emergency flag (close beats open)."""
-    _ensure_dir_for(EMERGENCY_PATH)
+def set_safety_hold(reason):
+    """Sentinel-owned: raise the 'do not open' safety hold, set whenever the safety
+    proxy (weather + UPS + darkness) says unsafe so the observatory-open sequence
+    aborts (close beats open). NOT an emergency in itself - it is benign when the
+    roof is already closed; the emergency is a roof that won't secure."""
+    _ensure_dir_for(SAFETY_HOLD_PATH)
     try:
-        with open(EMERGENCY_PATH, "w") as f:
+        with open(SAFETY_HOLD_PATH, "w") as f:
             json.dump({"reason": reason, "ts": time.time(),
                        "host": socket.gethostname().split(".")[0]}, f)
-        logger.warning("EMERGENCY raised: %s", reason)
+        logger.info("safety hold set (opening blocked): %s", reason)
     except OSError as e:
-        logger.error("cannot raise emergency flag: %s", e)
+        logger.error("cannot set safety hold: %s", e)
 
 
-def clear_emergency():
-    """Sentinel-owned: clear once the observatory is safe and weather recovered."""
+def clear_safety_hold():
+    """Sentinel-owned: clear once the safety proxy says it is OK to open again."""
     try:
-        os.remove(EMERGENCY_PATH)
-        logger.info("emergency flag cleared")
+        os.remove(SAFETY_HOLD_PATH)
+        logger.info("safety hold cleared (opening allowed)")
     except FileNotFoundError:
         pass
     except OSError as e:
-        logger.error("cannot clear emergency flag: %s", e)
+        logger.error("cannot clear safety hold: %s", e)
 
 
-def is_emergency():
-    return os.path.exists(EMERGENCY_PATH)
+def is_safety_hold():
+    return os.path.exists(SAFETY_HOLD_PATH)
 
 
 def mark_shutdown_complete():
