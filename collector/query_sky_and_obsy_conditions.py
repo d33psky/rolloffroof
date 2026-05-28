@@ -7,7 +7,7 @@ import requests
 import MySQLdb
 
 db = MySQLdb.connect(
-    host="lxc-rrd",
+    host="localhost",
     port=3306,
     user='sens',
     passwd='sens',
@@ -29,7 +29,7 @@ def check_db(minutes):
         db_date = db_result_tuple[1]
     except:
         raise
-    if db_date < datetime.datetime.utcnow() - datetime.timedelta(minutes=minutes) :
+    if db_date < datetime.datetime.now(datetime.UTC).replace(tzinfo=None) - datetime.timedelta(minutes=minutes) :
         print("DB last timestamp {db_date} is More than {minutes} minutes ago -> close".format(db_date=db_date, minutes=minutes))
         print("Stop_Imaging (do not wait). Park (wait), Close_Roof")
         quit(1)
@@ -285,7 +285,7 @@ INSERT INTO observatory1.roof ({keys})
 #        db_date      = db_result_tuple[1]
 #    except:
 #        raise
-#    if db_date < datetime.datetime.utcnow() - datetime.timedelta(minutes=minutes) :
+#    if db_date < datetime.datetime.now(datetime.UTC).replace(tzinfo=None) - datetime.timedelta(minutes=minutes) :
 #        print("DB last timestamp {db_date} is More than {minutes} minutes ago -> close".format(db_date=db_date, minutes=minutes))
 #        print("Stop_Imaging (do not wait). Park (wait), Close_Roof")
 #        quit(1)
@@ -320,13 +320,13 @@ def sendToMattermost(url, message):
     print("Send to mattermost: {}".format(message))
     payload = {}
     payload['text'] = message
-    r = requests.post(url, data={'payload': json.dumps(payload, sort_keys=True, indent=4)})
+    try:
+        r = requests.post(url, data={'payload': json.dumps(payload, sort_keys=True, indent=4)}, timeout=10)
+    except Exception as e:
+        print("WARNING: Mattermost send failed: {}".format(e))
+        return
     if r.status_code != 200:
-        try:
-            r = json.loads(r.text)
-        except ValueError:
-            r = {'message': r.text, 'status_code': r.status_code}
-            raise RuntimeError("{} ({})".format(r['message'], r['status_code']))
+        print("WARNING: Mattermost returned {}: {}".format(r.status_code, r.text[:200]))
 
 def main():
     home = str(Path.home())
@@ -452,7 +452,7 @@ def main():
 
 #    print(reasons)
 
-    utcnow = datetime.datetime.utcnow()
+    utcnow = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
 #    last_open_ok = retrieve_previous_open_ok()
     event = ''
     roof_change = False

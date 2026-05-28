@@ -47,7 +47,7 @@ if len(sys.argv) != 6:
 keys   = keys_str.split(':')
 values = values_str.split(':')
 
-utcnow = datetime.datetime.utcnow()
+utcnow = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
 
 database = MySQLdb.connect(
     host="localhost",
@@ -126,7 +126,7 @@ except:
     db_date = utcnow
     must_insert = True
 
-if must_insert or db_date < datetime.datetime.utcnow() - datetime.timedelta(minutes=1) :
+if must_insert or db_date < datetime.datetime.now(datetime.UTC).replace(tzinfo=None) - datetime.timedelta(minutes=1) :
     print("{} is More than a minute ago -> INSERT".format(db_date))
 
     print("Hack: but first call ./query_sky_and_obsy_conditions.py")
