@@ -24,12 +24,17 @@ r.report("critical","roof did not close", state={"mount_parked":True,"roof_close
 r.report("warn","weather unsafe")
 info_txt, crit_txt, warn_txt = captured
 
+import re
+TS = r"\d\d:\d\d:\d\d\.\d{3}"   # HH:MM:SS.mmm local timestamp injected by Reporter
 check("info is one line", "\n" not in info_txt)
 check("info has NO mention", "@hans" not in info_txt)
 check("info has NO code block", "```" not in info_txt)
-check("info carries source tag", "[observatory]" in info_txt)
+check("info carries [HH:MM:SS.mmm source] tag",
+      bool(re.search(r"\[" + TS + r" observatory\]", info_txt)))
 check("critical HAS mention", "@hans" in crit_txt)
 check("critical WITH state renders a code block", "```" in crit_txt and "mount_parked: True" in crit_txt)
+check("critical carries timestamped source tag",
+      bool(re.search(r"\[" + TS + r" observatory\]", crit_txt)))
 check("warn HAS mention", "@hans" in warn_txt)
 check("warn WITHOUT state is one line, no block", "\n" not in warn_txt and "```" not in warn_txt)
 

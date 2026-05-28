@@ -38,6 +38,7 @@ class FakeO:
     def state_snapshot(self): return {"mount_parked": self._parked, "roof_closed": self._roof}
     def report(self, sev, title, body=None, state=None): self.calls.append(("report", sev, title))
     def names(self): return [c[0] for c in self.calls]
+    def reports(self): return [c for c in self.calls if c[0] == "report"]
 
 class FakeDbus:
     def stop_scheduler(self): pass
@@ -55,12 +56,14 @@ obs.Lease = FakeLease
 _LEASE = {"val": None, "fresh": False}
 obs.read_lease = lambda *a, **k: _LEASE["val"]
 obs.lease_is_fresh = lambda lease, ttl=90: _LEASE["fresh"]
+_MARKER = {"set": False}
+obs.is_shutdown_complete = lambda: _MARKER["set"]
 
 def st0(**kw):
     s = {"unsafe_count": 0, "hold_set": False, "indi_down": False,
          "roof_unknown_since": None, "cooler_on_since": None}
     s.update(kw); return s
-def reset(): HOLD["set"] = False; _LEASE["val"] = None; _LEASE["fresh"] = False
+def reset(): HOLD["set"] = False; _LEASE["val"] = None; _LEASE["fresh"] = False; _MARKER["set"] = False
 
 # 1. ensure_devices_connected called each cycle
 reset(); o = FakeO(); S.evaluate_cycle(o, FakeDbus(), cfg, st0())
@@ -129,6 +132,51 @@ st = st0(cooler_on_since=time.time() - 9999)
 S.evaluate_cycle(o, FakeDbus(), cfg, st)
 check("fan guard: roof open resets timer, no cooler_off",
       "cooler_off" not in o.names() and st["cooler_on_since"] is None)
+
+# Narration: full shutdown cycle in one test
+# 12. fresh close lease (shutdown PRE running) + no marker -> "Observing" once
+reset(); _LEASE["val"] = {"role": "close"}; _LEASE["fresh"] = True
+o = FakeO(weather="Ok", roof=False)         # roof still open during pre
+st = st0()
+S.evaluate_cycle(o, FakeDbus(), cfg, st)
+obs_msgs = [c for c in o.reports() if "Observing" in c[2]]
+check("narrate: 'Observing' reported once on fresh close lease",
+      len(obs_msgs) == 1 and obs_msgs[0][1] == "info" and st["shutdown_observing_reported"] is True)
+
+# 13. next cycle still sees the lease -> NO re-report
+o2 = FakeO(weather="Ok", roof=False)
+S.evaluate_cycle(o2, FakeDbus(), cfg, st)
+check("narrate: 'Observing' not re-reported while still in pre/post",
+      not [c for c in o2.reports() if "Observing" in c[2]])
+
+# 14. marker set + state OK -> "Observed" once (the dawn-loop noise is suppressed)
+_MARKER["set"] = True; _LEASE["val"] = None; _LEASE["fresh"] = False
+o3 = FakeO(weather="Ok", roof=True, parked=True)
+S.evaluate_cycle(o3, FakeDbus(), cfg, st)
+ack = [c for c in o3.reports() if "observed: state OK" in c[2]]
+check("narrate: 'Observed' fires once with marker set + state OK",
+      len(ack) == 1 and ack[0][1] == "info" and st["shutdown_observed_reported"] is True)
+
+# 15. marker stays set (dawn loop) -> silent (no re-report)
+o4 = FakeO(weather="Ok", roof=True, parked=True)
+S.evaluate_cycle(o4, FakeDbus(), cfg, st)
+check("narrate: silent while marker remains set (dawn loop suppressed)",
+      not [c for c in o4.reports() if "observed" in c[2].lower() or "Observing" in c[2]])
+
+# 16. observatory-open clears marker -> flags reset for next shutdown
+_MARKER["set"] = False
+o5 = FakeO(weather="Ok", roof=False)
+S.evaluate_cycle(o5, FakeDbus(), cfg, st)
+check("narrate: flags reset on marker-cleared edge (ready for next shutdown)",
+      st["shutdown_observing_reported"] is False and st["shutdown_observed_reported"] is False)
+
+# 17. marker set but state BAD -> NO 'observed: state OK' report (failsafe owns that)
+reset(); _MARKER["set"] = True
+o6 = FakeO(weather="Ok", roof=False, parked=False)   # NOT parked, roof open
+st = st0()
+S.evaluate_cycle(o6, FakeDbus(), cfg, st)
+check("narrate: marker set but state bad -> no false 'OK' claim",
+      not [c for c in o6.reports() if "observed: state OK" in c[2]])
 
 print("\n{} passed, {} failed".format(PASS[0], FAIL[0]))
 sys.exit(1 if FAIL[0] else 0)

@@ -158,6 +158,42 @@ def failsafe_close(o, ekos_dbus, config, reason):
         lease.release()
 
 
+def narrate_shutdown(o, st):
+    """Report (once each) that we observed Ekos shutting down and that we observed
+    the completed end-state. Both flags reset when the shutdown-complete marker is
+    cleared (by observatory-open at the start of the next session) so each shutdown
+    gets its own pair of reports.
+
+    'Observing' fires on first sight of a fresh 'close' lease in the current
+    shutdown window. 'Observed' fires once after the marker is set AND the end
+    state is verified parked + roof-closed (a bad state stays silent so the
+    failsafe path owns alerting). All info severity (no @hans mention)."""
+    prev = st.get("shutdown_complete_prev", False)
+    curr = obs.is_shutdown_complete()
+    if prev and not curr:                         # leading edge: marker cleared -> new session
+        st["shutdown_observing_reported"] = False
+        st["shutdown_observed_reported"] = False
+    st["shutdown_complete_prev"] = curr
+
+    if curr:
+        if not st.get("shutdown_observed_reported"):
+            state = o.state_snapshot()
+            if state.get("mount_parked") and state.get("roof_closed") is True:
+                o.report("info", "Ekos shutdown observed: state OK, no intervention needed",
+                         state=state)
+                logger.info("Ekos shutdown observed: state OK")
+                st["shutdown_observed_reported"] = True
+        return
+
+    lease = obs.read_lease()
+    if lease and lease.get("role") == "close" and obs.lease_is_fresh(lease):
+        if not st.get("shutdown_observing_reported"):
+            o.report("info",
+                     "Observing Ekos shutdown by observatory-close, deferring while it completes")
+            logger.info("observing Ekos shutdown (close lease seen); deferring")
+            st["shutdown_observing_reported"] = True
+
+
 def guard_camera_fan(o, config, st):
     """Keep the camera fan off while the observatory is idle. The fan tracks the
     cooler ENABLE switch (CCD_COOLER.COOLER_ON), which the INDI temperature-ramp loop
@@ -193,14 +229,16 @@ def guard_camera_fan(o, config, st):
 
 def evaluate_cycle(o, ekos_dbus, config, st):
     """One decision cycle. `st` carries loop state {unsafe_count, hold_set,
-    indi_down, roof_unknown_since, cooler_on_since}. Extracted so the logic is
-    unit-testable.
+    indi_down, roof_unknown_since, cooler_on_since, shutdown_complete_prev,
+    shutdown_observing_reported, shutdown_observed_reported}. Extracted so the
+    logic is unit-testable.
 
     Check the ROOF first - a closed roof needs no close and no debounce. The
     safety-proxy verdict (weather + UPS + darkness) then decides the 'do not open'
     safety_hold. The debounce gates ONLY the disruptive close of an OPEN roof."""
     # Keep our own INDI devices connected - never depend on Ekos for connectivity.
     o.ensure_devices_connected()
+    narrate_shutdown(o, st)               # info-level acks of shutdown start / end
 
     reachable, safe = read_weather(o, config)
     if not reachable:
@@ -348,7 +386,7 @@ def main():
                         format="%(asctime)s %(levelname)-8s %(name)s %(message)s")
 
     config = obs.ObservatoryConfig(args.config or DEFAULT_CONFIG)
-    o = obs.Observatory(args.indi_host, config)
+    o = obs.Observatory(args.indi_host, config, name="sentinel")
     if args.indi_command_retries:
         o.max_retries = int(args.indi_command_retries)
     ekos_dbus = EkosDbus()
@@ -358,7 +396,9 @@ def main():
 
     sleep_s = config.get("safety.main_loop_sleep_seconds", 60)
     st = {"unsafe_count": 0, "hold_set": False, "indi_down": False,
-          "roof_unknown_since": None, "cooler_on_since": None}
+          "roof_unknown_since": None, "cooler_on_since": None,
+          "shutdown_complete_prev": False, "shutdown_observing_reported": False,
+          "shutdown_observed_reported": False}
 
     looping = True
     while looping:

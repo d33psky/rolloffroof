@@ -40,8 +40,10 @@ import os
 import shlex
 import socket
 import subprocess
+import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 import requests
@@ -124,8 +126,9 @@ class Reporter:
         line = title if not body else "{} - {}".format(title, body)
         if self.mention and severity in self.mention_severities:
             line = "{} {}".format(self.mention, line)
-        parts = ["{} **[{}]** {}".format(SEVERITY_EMOJI.get(severity, ":information_source:"),
-                                         self.source, line)]
+        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]   # HH:MM:SS.mmm (local)
+        parts = ["{} [{} {}] {}".format(SEVERITY_EMOJI.get(severity, ":information_source:"),
+                                        ts, self.source, line)]
         if state:
             parts.append("```\n" + "\n".join("{}: {}".format(k, v) for k, v in state.items()) + "\n```")
         text = "\n".join(parts)
@@ -321,14 +324,19 @@ class Observatory:
     192.168.100.73:3490) - independent of the INDI server.
     """
 
-    def __init__(self, indi_host, config, dry_run=False, reporter=None):
+    def __init__(self, indi_host, config, dry_run=False, reporter=None, name=None):
         self.indi_host = config.get("connections.indi_host", indi_host)
         self.config = config
         self.dry_run = dry_run
+        # Source identity for reports: explicit name > config override > script basename.
+        # Scripts (observatory-open-pre etc.) get their symlink name automatically;
+        # ekos_sentinel passes name="sentinel" explicitly.
+        self.name = (name or config.get("report.source")
+                     or os.path.basename(sys.argv[0]) or "observatory")
         self.reporter = reporter or Reporter(
             url_file=config.get("report.url_file"),
             mention=config.get("report.mention"),
-            source=config.get("report.source", "observatory"),
+            source=self.name,
         )
         self.logger = logging.getLogger("observatory")
 
@@ -764,7 +772,6 @@ def _parse_dms(resp):
 
 if __name__ == "__main__":
     # Quick state dump for debugging: observatorylib.py <config> [indi_host]
-    import sys
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = ObservatoryConfig(sys.argv[1] if len(sys.argv) > 1 else "ekos_sentinel_config_production.yaml")
     host = sys.argv[2] if len(sys.argv) > 2 else "localhost"
