@@ -187,5 +187,39 @@ S.evaluate_cycle(o7, FakeDbus(), cfg, st)
 check("narrate: inherited marker at startup -> no stale 'observed' report",
       not [c for c in o7.reports() if "observed" in c[2].lower()])
 
+# 19. narrate_startup: fresh open lease -> 'Observing startup' reported once
+reset(); _LEASE["val"] = {"role": "open"}; _LEASE["fresh"] = True
+o = FakeO(weather="Ok", roof=True)         # roof still closed during pre
+st = st0(startup_prev_roof_closed=True)
+S.evaluate_cycle(o, FakeDbus(), cfg, st)
+obs_msgs = [c for c in o.reports() if "Observing Ekos startup" in c[2]]
+check("narrate startup: 'Observing' fires on fresh open lease",
+      len(obs_msgs) == 1 and obs_msgs[0][1] == "info" and st["startup_observing_reported"] is True)
+
+# 20. narrate_startup: roof transitions closed->open with mount unparked -> 'Observed' once
+reset(); _LEASE["val"] = None; _LEASE["fresh"] = False
+o = FakeO(weather="Ok", roof=False, parked=False)   # roof now open, mount unparked
+st = st0(startup_prev_roof_closed=True)
+S.evaluate_cycle(o, FakeDbus(), cfg, st)
+ack = [c for c in o.reports() if "startup observed" in c[2].lower()]
+check("narrate startup: closed->open + unparked -> 'Observed' fires once",
+      len(ack) == 1 and ack[0][1] == "info" and st["startup_observed_reported"] is True)
+
+# 21. narrate_startup: open->closed (session ended) -> flags reset for next startup
+reset(); o = FakeO(weather="Ok", roof=True, parked=True)
+st = st0(startup_prev_roof_closed=False,
+         startup_observing_reported=True, startup_observed_reported=True)
+S.evaluate_cycle(o, FakeDbus(), cfg, st)
+check("narrate startup: open->closed edge -> flags reset",
+      st["startup_observing_reported"] is False and st["startup_observed_reported"] is False)
+
+# 22. fan-guard: open lease fresh -> stand down silently (no warm-up timer arming)
+reset(); _LEASE["val"] = {"role": "open"}; _LEASE["fresh"] = True
+o = FakeO(weather="Ok", roof=True, cooler_on=True)
+st = st0(startup_prev_roof_closed=True)
+S.evaluate_cycle(o, FakeDbus(), cfg, st)
+check("fan guard: open lease fresh -> no timer armed (cooler is for startup)",
+      st["cooler_on_since"] is None and "cooler_off" not in o.names())
+
 print("\n{} passed, {} failed".format(PASS[0], FAIL[0]))
 sys.exit(1 if FAIL[0] else 0)

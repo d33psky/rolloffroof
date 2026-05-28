@@ -110,6 +110,15 @@ def scheduler_is_closing():
     return obs.lease_is_fresh(lease) and (lease or {}).get("role") == "close"
 
 
+def scheduler_is_opening():
+    """True if a fresh 'open' lease is held - i.e. observatory-open is running
+    the startup sequence. The fan-guard defers to that: the cooler is on because
+    the pre-script just started cooling for the session - not an abandoned
+    idle cooler, so no warm-up timer is appropriate."""
+    lease = obs.read_lease()
+    return obs.lease_is_fresh(lease) and (lease or {}).get("role") == "open"
+
+
 def _safe_dbus(label, fn):
     """Call an EkosDbus method, swallowing failures INCLUDING SystemExit.
     ekos_cli's setup_*_iface() calls sys.exit(1) on DBusException when KStars is
@@ -193,6 +202,44 @@ def narrate_shutdown(o, st):
             st["shutdown_observing_reported"] = True
 
 
+def narrate_startup(o, st):
+    """Symmetric to narrate_shutdown: report (once each) that we observed Ekos
+    starting up. 'Observing' fires on first sight of a fresh 'open' lease.
+    'Observed' fires once on the roof closed->open transition, provided the
+    end state is verified (roof open + mount unparked = ready to image).
+
+    Flags reset on the open->closed edge (next shutdown boundary) so the next
+    startup gets its own pair of reports. All info severity (no @hans)."""
+    prev_closed = st.get("startup_prev_roof_closed", True)
+    closed = o.is_roof_closed()
+
+    # leading edge open->closed: session ended -> arm narration for next startup
+    if prev_closed is False and closed is True:
+        st["startup_observing_reported"] = False
+        st["startup_observed_reported"] = False
+
+    # leading edge closed->open: startup just completed -> verify state, report once
+    if prev_closed is True and closed is False and not st.get("startup_observed_reported"):
+        state = o.state_snapshot()
+        if state.get("roof_closed") is False and not state.get("mount_parked"):
+            o.report("info", "Ekos startup observed: roof open, mount unparked, ready to image",
+                     state=state)
+            st["startup_observed_reported"] = True
+        # else: roof open but mount still parked (probably mid-post) - wait one cycle
+
+    # Track current closed-state for next cycle's edge detection (only on definitive reads).
+    if closed is True or closed is False:
+        st["startup_prev_roof_closed"] = (closed is True)
+
+    # 'Observing' on first sight of a fresh open-lease (during pre/post script run)
+    lease = obs.read_lease()
+    if lease and lease.get("role") == "open" and obs.lease_is_fresh(lease):
+        if not st.get("startup_observing_reported"):
+            o.report("info",
+                     "Observing Ekos startup by observatory-open, deferring while it completes")
+            st["startup_observing_reported"] = True
+
+
 def guard_camera_fan(o, config, st):
     """Keep the camera fan off while the observatory is idle. The fan tracks the
     cooler ENABLE switch (CCD_COOLER.COOLER_ON), which the INDI temperature-ramp loop
@@ -206,6 +253,13 @@ def guard_camera_fan(o, config, st):
     full timeout, so it can never truncate a real warm-up."""
     on = o.cooler_is_on()
     if on is not True:                      # off, or unreadable -> nothing to guard
+        st["cooler_on_since"] = None
+        return
+    # Ekos startup in progress (observatory-open holds the 'open' lease): the
+    # cooler is legitimately on (the pre-script started cooling for the
+    # imminent session). Stand down silently - narrate_startup is already
+    # announcing the startup; no warm-up-guard semantics apply here.
+    if scheduler_is_opening():
         st["cooler_on_since"] = None
         return
     now = time.time()
@@ -229,8 +283,9 @@ def guard_camera_fan(o, config, st):
 def evaluate_cycle(o, ekos_dbus, config, st):
     """One decision cycle. `st` carries loop state {unsafe_count, hold_set,
     indi_down, roof_unknown_since, cooler_on_since, shutdown_complete_prev,
-    shutdown_observing_reported, shutdown_observed_reported}. Extracted so the
-    logic is unit-testable.
+    shutdown_observing_reported, shutdown_observed_reported,
+    startup_prev_roof_closed, startup_observing_reported,
+    startup_observed_reported}. Extracted so the logic is unit-testable.
 
     Check the ROOF first - a closed roof needs no close and no debounce. The
     safety-proxy verdict (weather + UPS + darkness) then decides the 'do not open'
@@ -238,6 +293,7 @@ def evaluate_cycle(o, ekos_dbus, config, st):
     # Keep our own INDI devices connected - never depend on Ekos for connectivity.
     o.ensure_devices_connected()
     narrate_shutdown(o, st)               # info-level acks of shutdown start / end
+    narrate_startup(o, st)                # info-level acks of startup start / end
 
     reachable, safe = read_weather(o, config)
     if not reachable:
@@ -400,12 +456,19 @@ def main():
     # shutdown that may have happened hours ago. The marker is cleared by the
     # next observatory-open; the leading-edge reset in narrate_shutdown then
     # reopens narration for the next real cycle.
+    # Same inheritance pattern for the startup narration: if the roof is
+    # already open when we start, a session is in progress that we did not
+    # witness - pre-mark startup_observed_reported so we don't claim it.
     inherited_marker = obs.is_shutdown_complete()
+    inherited_open = (o.is_roof_closed() is False)
     st = {"unsafe_count": 0, "hold_set": False, "indi_down": False,
           "roof_unknown_since": None, "cooler_on_since": None,
           "shutdown_complete_prev": inherited_marker,
           "shutdown_observing_reported": False,
-          "shutdown_observed_reported": inherited_marker}
+          "shutdown_observed_reported": inherited_marker,
+          "startup_prev_roof_closed": not inherited_open,
+          "startup_observing_reported": inherited_open,
+          "startup_observed_reported": inherited_open}
 
     # One-shot test mode: no start/stop reports (those are for the long-running
     # screen instance), just run a single cycle.
