@@ -40,22 +40,25 @@ def db_connect(config):
 
 
 def get_weather_status(db_cursor):
+#    return (None, None, None)
     sql = """
     SELECT open_ok, reasons, create_time
       FROM roof
-     WHERE create_time > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 120 second)
+     WHERE create_time > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 520 second)
   ORDER BY create_time DESC
      LIMIT 1;
     """
     db_cursor.execute(sql)
     db_result_tuple = db_cursor.fetchone()
-    try:
-        open_ok = True if db_result_tuple[0] == 1 else False
+    if db_result_tuple is not None:
+#        open_ok = True if db_result_tuple[0] == 1 else False
+        open_ok = db_result_tuple[0]
         reasons = db_result_tuple[1]
         create_time = db_result_tuple[2]
-    except:
-        # TODO
-        raise
+    else:
+        open_ok = None
+        reasons = None
+        create_time = None
     return (open_ok, reasons, create_time)
 
 
@@ -67,15 +70,20 @@ def main():
 
     (open_ok, reasons, create_time) = get_weather_status(db_cursor)
 
-    create_time_formatted = create_time.isoformat()
-    json_string = json.dumps({
-        'timestamp_utc': create_time_formatted,
-        'roof_status': {
-            'open_ok': open_ok,
-            'reasons': reasons,
-        }
-    },
-                             indent=4)
+    if open_ok is not None:
+        create_time_formatted = create_time.isoformat()
+        json_string = json.dumps({
+            'timestamp_utc': create_time_formatted,
+            'roof_status': {
+                'open_ok': open_ok,
+                'reasons': reasons,
+            }
+        },
+            indent=4)
+    else:
+        json_string = json.dumps({
+            'error': 'Empty DB result',
+        })
     print(json_string)
 
 
