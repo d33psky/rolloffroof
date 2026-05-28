@@ -6,6 +6,12 @@ from pathlib import Path
 import requests
 import MySQLdb
 
+# Mattermost rich-format constants (kept in sync with observatorylib.Reporter so
+# this script's messages look the same as sentinel/scripts in #observatory).
+SEVERITY_EMOJI = {"info": ":information_source:", "warn": ":warning:", "critical": ":rotating_light:"}
+MM_TAG = "safety-conditions"
+MM_MENTION = "@hans"
+
 db = MySQLdb.connect(
     host="localhost",
     port=3306,
@@ -316,10 +322,17 @@ INSERT INTO observatory1.events ({keys})
         db.rollback()
         raise
 
-def sendToMattermost(url, message):
-    print("Send to mattermost: {}".format(message))
-    payload = {}
-    payload['text'] = message
+def sendToMattermost(url, severity, message):
+    """Post a one-liner to Mattermost in the standard format used across the
+    observatory: ':icon: [HH:MM:SS.mmm safety-conditions] message'. warn and
+    critical get the @hans mention prepended so the mentions-only #observatory
+    channel pushes; info stays silent (channel breadcrumb)."""
+    ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    icon = SEVERITY_EMOJI.get(severity, ":information_source:")
+    line = "{} {}".format(MM_MENTION, message) if severity in ("warn", "critical") else message
+    text = "{} [{} {}] {}".format(icon, ts, MM_TAG, line)
+    print("Send to mattermost: {}".format(text))
+    payload = {'text': text}
     try:
         r = requests.post(url, data={'payload': json.dumps(payload, sort_keys=True, indent=4)}, timeout=10)
     except Exception as e:
@@ -330,7 +343,7 @@ def sendToMattermost(url, message):
 
 def main():
     home = str(Path.home())
-    mattermost_url_file = open(home + "/.mattermosturl", 'r')
+    mattermost_url_file = open(home + "/.mattermosturl-observatory", 'r')
     url = mattermost_url_file.read().rstrip('\n')
     mattermost_url_file.close()
 
@@ -472,7 +485,13 @@ def main():
     print("Roof {}, {}".format(event, reasons))
 
     if roof_change is True:
-        sendToMattermost(url, event + ", " + reasons)
+        # Event names in the DB stay technical ("opening"/"closing"); the
+        # user-facing MM message describes that CONDITIONS changed (this script
+        # only observes the sensors, it does not actuate the roof).
+        if event == "opening":
+            sendToMattermost(url, "warn", "Conditions allow opening: " + reasons)
+        elif event == "closing":
+            sendToMattermost(url, "info", "Conditions require closing: " + reasons)
         store_event(utcnow, event, reasons)
 
 #    last_open_ok = retrieve_previous_open_ok()
