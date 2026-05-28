@@ -45,6 +45,7 @@ default next to this script.
 import argparse
 import logging
 import os
+import signal
 import sys
 import time
 
@@ -400,17 +401,34 @@ def main():
           "shutdown_complete_prev": False, "shutdown_observing_reported": False,
           "shutdown_observed_reported": False}
 
-    looping = True
-    while looping:
-        if args.once:
-            looping = False
-        try:
-            evaluate_cycle(o, ekos_dbus, config, st)
-        except Exception as e:
-            logger.error("Unexpected error in main loop: %s. Will retry in %ss.", e, sleep_s)
-        if looping:
+    # One-shot test mode: no start/stop reports (those are for the long-running
+    # screen instance), just run a single cycle.
+    if args.once:
+        evaluate_cycle(o, ekos_dbus, config, st)
+        return
+
+    # Long-running mode: report start now, and ensure a stop report fires on
+    # exit - whether via Ctrl-C (SIGINT->KeyboardInterrupt) or SIGTERM. Map
+    # SIGTERM to KeyboardInterrupt so both paths reach the 'finally' clause.
+    def _sigterm_to_kbd(_signo, _frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _sigterm_to_kbd)
+    pid = os.getpid()
+    o.report("info", "Sentinel started (PID {})".format(pid))
+    logger.info("sentinel started (PID %d)", pid)
+    try:
+        while True:
+            try:
+                evaluate_cycle(o, ekos_dbus, config, st)
+            except Exception as e:
+                logger.error("Unexpected error in main loop: %s. Will retry in %ss.", e, sleep_s)
             logger.debug("sleep %s", sleep_s)
             time.sleep(sleep_s)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        o.report("warn", "Sentinel stopped (PID {})".format(pid))
+        logger.warning("sentinel stopped (PID %d)", pid)
 
 
 if __name__ == "__main__":
