@@ -178,5 +178,14 @@ S.evaluate_cycle(o6, FakeDbus(), cfg, st)
 check("narrate: marker set but state bad -> no false 'OK' claim",
       not [c for c in o6.reports() if "observed: state OK" in c[2]])
 
+# 18. sentinel starts with marker ALREADY set (inherited from prior shutdown):
+#     must NOT claim 'observed' for a shutdown it never witnessed
+reset(); _MARKER["set"] = True
+o7 = FakeO(weather="Ok", roof=True, parked=True)
+st = st0(shutdown_complete_prev=True, shutdown_observed_reported=True)  # init-aware (matches main())
+S.evaluate_cycle(o7, FakeDbus(), cfg, st)
+check("narrate: inherited marker at startup -> no stale 'observed' report",
+      not [c for c in o7.reports() if "observed" in c[2].lower()])
+
 print("\n{} passed, {} failed".format(PASS[0], FAIL[0]))
 sys.exit(1 if FAIL[0] else 0)

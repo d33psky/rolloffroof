@@ -182,7 +182,6 @@ def narrate_shutdown(o, st):
             if state.get("mount_parked") and state.get("roof_closed") is True:
                 o.report("info", "Ekos shutdown observed: state OK, no intervention needed",
                          state=state)
-                logger.info("Ekos shutdown observed: state OK")
                 st["shutdown_observed_reported"] = True
         return
 
@@ -191,7 +190,6 @@ def narrate_shutdown(o, st):
         if not st.get("shutdown_observing_reported"):
             o.report("info",
                      "Observing Ekos shutdown by observatory-close, deferring while it completes")
-            logger.info("observing Ekos shutdown (close lease seen); deferring")
             st["shutdown_observing_reported"] = True
 
 
@@ -396,10 +394,18 @@ def main():
         sys.exit(0)
 
     sleep_s = config.get("safety.main_loop_sleep_seconds", 60)
+    # If the shutdown-complete marker is ALREADY set when we start, we did not
+    # observe THIS shutdown happen - we inherited its aftermath. Pre-mark the
+    # 'observed' flag so we don't fire a stale "shutdown observed" report for a
+    # shutdown that may have happened hours ago. The marker is cleared by the
+    # next observatory-open; the leading-edge reset in narrate_shutdown then
+    # reopens narration for the next real cycle.
+    inherited_marker = obs.is_shutdown_complete()
     st = {"unsafe_count": 0, "hold_set": False, "indi_down": False,
           "roof_unknown_since": None, "cooler_on_since": None,
-          "shutdown_complete_prev": False, "shutdown_observing_reported": False,
-          "shutdown_observed_reported": False}
+          "shutdown_complete_prev": inherited_marker,
+          "shutdown_observing_reported": False,
+          "shutdown_observed_reported": inherited_marker}
 
     # One-shot test mode: no start/stop reports (those are for the long-running
     # screen instance), just run a single cycle.
@@ -415,7 +421,6 @@ def main():
     signal.signal(signal.SIGTERM, _sigterm_to_kbd)
     pid = os.getpid()
     o.report("info", "Sentinel started (PID {})".format(pid))
-    logger.info("sentinel started (PID %d)", pid)
     try:
         while True:
             try:
@@ -428,7 +433,6 @@ def main():
         pass
     finally:
         o.report("warn", "Sentinel stopped (PID {})".format(pid))
-        logger.warning("sentinel stopped (PID %d)", pid)
 
 
 if __name__ == "__main__":
