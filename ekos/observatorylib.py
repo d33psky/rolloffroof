@@ -400,16 +400,39 @@ class Observatory:
         return prop.split(".")[0] if prop else None
 
     def is_device_connected(self, device):
-        return self.indi_get("{}.CONNECTION.CONNECT".format(device)) == "On"
+        """True / False / None. True == CONNECT==On (connected); False ==
+        positively disconnected (CONNECT==Off / DISCONNECT==On); None ==
+        unreadable (e.g. the Dome Scripting Gateway during a park.py/open.py
+        run, where the property goes transient while the script executes).
+        Callers MUST NOT treat None as 'disconnected' - it is a transient
+        state, not an actionable state."""
+        if not device:
+            return None
+        val = self.indi_get("{}.CONNECTION.CONNECT".format(device))
+        if val == "On":
+            return True
+        if val == "Off":
+            return False
+        return None
 
     def connect_device(self, device, timeout=None):
-        """Idempotently connect an INDI device; True once CONNECT==On. Cheap no-op
-        when already connected."""
-        if not device or self.is_device_connected(device):
+        """Idempotently connect an INDI device; True once CONNECT==On. Cheap
+        no-op when already connected. Refuses-with-False (silent debug) when
+        the device's CONNECTION property is unreadable - that is a transient
+        state, not an actionable disconnect, and poking a busy driver tends to
+        fail and waste a timeout."""
+        if not device:
             return True
+        state = self.is_device_connected(device)
+        if state is True:
+            return True
+        if state is None:
+            self.logger.debug("INDI device '%s' state unreadable - skipping (in transition?)", device)
+            return False
+        # state is False -> positively disconnected, try to reconnect
         self.logger.warning("INDI device '%s' disconnected - connecting", device)
         self.indi_set("{}.CONNECTION.CONNECT".format(device), "On")
-        return self._wait_until(lambda: self.is_device_connected(device),
+        return self._wait_until(lambda: self.is_device_connected(device) is True,
                                 timeout or self.config.get("timeouts.device_connect", 15))
 
     def safety_devices(self):
@@ -425,10 +448,33 @@ class Observatory:
         return devs
 
     def ensure_devices_connected(self):
-        """Connect every safety device that is disconnected. Returns True if all are
-        connected (False if some couldn't be, e.g. the indiserver itself is down)."""
+        """Reconnect every safety device that is POSITIVELY disconnected. Returns
+        True if all desired connections are in place (or were left alone for
+        good reason).
+
+        Scheduler-procedure aware: while a fresh 'open' or 'close' lease is
+        held, observatory-open / observatory-close owns the devices; defer
+        entirely on connection management so we do not race the script
+        (e.g. a deliberate driver bounce mid-procedure, or the dome's
+        CONNECTION property going transient during park.py/open.py - that
+        last case is also caught by the tri-state below, but the lease guard
+        is the broader 'do not fight the procedure' rule).
+
+        Per-device tri-state: True == leave alone (already connected); False
+        == reconnect; None == unreadable (silent skip, transient state)."""
+        lease = read_lease()
+        if lease and lease_is_fresh(lease) and lease.get("role") in ("open", "close"):
+            self.logger.debug("device connect check deferred (%s lease held)", lease.get("role"))
+            return True
         ok = True
         for d in self.safety_devices():
+            state = self.is_device_connected(d)
+            if state is True:
+                continue
+            if state is None:
+                self.logger.debug("INDI device '%s' state unreadable - skipping", d)
+                continue
+            # state is False -> positively disconnected, try to reconnect
             if not self.connect_device(d):
                 self.logger.error("could not connect INDI device '%s'", d)
                 ok = False

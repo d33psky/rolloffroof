@@ -11,7 +11,7 @@ if python3 -c "import pyflakes" 2>/dev/null; then
     python3 -m pyflakes \
         "$EKOS/observatorylib.py" "$EKOS/ekos_sentinel.py" "$EKOS/ekos_cli.py" \
         "$EKOS/observatory-open" "$EKOS/observatory-close" \
-        test_reporter.py test_sentinel.py
+        test_reporter.py test_sentinel.py test_observatorylib.py
     echo "pyflakes clean"
 else
     echo "(pyflakes not installed - skipping static checks; sudo apt install python3-pyflakes)"
@@ -19,6 +19,8 @@ fi
 
 echo "== unit tests =="
 python3 test_reporter.py
+echo
+python3 test_observatorylib.py
 echo
 python3 test_sentinel.py
 echo
