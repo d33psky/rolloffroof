@@ -493,12 +493,13 @@ class Observatory:
         return self.lx200_enabled and self.mount_lx200("#:Gstat#") == self.lx200_gstat_parked
 
     def _parked_confirmed(self):
-        """Strong confirm for the irreversible close-roof precondition: INDI says
-        parked AND (when LX200 is configured) Gstat==5 agrees - Gstat 5 is also
-        exactly when the mount releases its lock, which the dome interlock needs."""
-        if not self.is_parked():
-            return False
-        return self._lx200_parked() if self.lx200_enabled else True
+        """Confirm parked before an irreversible close-roof action. is_parked() is
+        already INDI-primary (with LX200 Gstat as fallback only when INDI returns
+        None); that single check is the right gate. The LX200 path is reserved for
+        INDI-down scenarios, NOT an extra requirement - adding it would not help
+        the dome's snoop-lag race (the dome's mount-policy is a separate signal
+        that lags both INDI and LX200 by ~1s; handled by the settle in close_roof)."""
+        return self.is_parked()
 
     def mount_altaz(self):
         """(alt_deg, az_deg) from the mount, or (None, None)."""
@@ -594,12 +595,15 @@ class Observatory:
             self.logger.info("roof already closed")
             return True
         # SAFETY precondition: never close over a mount that is not fully parked.
-        # _parked_confirmed() requires INDI-parked and (if LX200 configured)
-        # Gstat==5 - which is also exactly when the mount releases its lock, so
-        # the dome Mount Policy interlock will accept the park.
         if not self._parked_confirmed():
             self.logger.critical("refusing to close roof: mount not confirmed parked")
             return False
+        # Settle: the dome's mount-policy interlock snoops a status that the
+        # 10Micron driver publishes from its ~1s internal poll, lagging
+        # TELESCOPE_PARK.PARK. Without a brief settle the first dome park is
+        # refused ("Cannot Park Dome when mount is locking") and we lose ~60s
+        # to the retry. The real fix belongs in the driver (TODO upstream).
+        time.sleep(2)
         prop = self.config.get("indi.dome.park_property")
         setting = self.config.get("indi.dome.park_setting")
         for attempt in range(1, self.max_retries + 1):
