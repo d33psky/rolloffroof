@@ -14,7 +14,7 @@
 
 #define AVG 1   //averaging samples
 
-#define HEATER_PIN     RPI_V2_GPIO_P5_04   // GPIO29 -> TIP120 base (cloud-sensor heater)
+#define HEATER_PIN     RPI_V2_GPIO_P5_03   // GPIO28 / P5-3 -> TIP120 base (cloud-sensor heater). NOT P5_04 — that is GPIO29 = wPi 18 = the green-button line read by controller.py (root cause of 2026-06-15 roof self-cycling incident).
 #define HEATER_ON_K    5.0                  // turn ON  if cap_T - dewpoint <  this
 #define HEATER_OFF_K   7.0                  // turn OFF if cap_T - dewpoint >  this (hysteresis)
 
