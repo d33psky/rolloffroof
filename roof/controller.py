@@ -7,6 +7,7 @@ import time
 import signal
 import os
 import socket
+from datetime import datetime, timezone
 import requests
 from flask import Flask, jsonify, request, render_template
 
@@ -57,7 +58,7 @@ logging.basicConfig(
 # inline copy. When changing the severity/emoji/mention convention, update
 # BOTH files in lockstep.
 # --------------------------------------------------------------------------
-MATTERMOST_URL_FILE = "/root/.mattermosturl"
+MATTERMOST_URL_FILE = "/root/.mattermosturl-observatory"
 MATTERMOST_SOURCE = "roof-controller"
 MATTERMOST_MENTION = "@hans"
 MATTERMOST_MENTION_SEVERITIES = ("critical",)  # warn intentionally NOT mentioned — silent channel log
@@ -73,10 +74,12 @@ def _notify_mattermost_worker(severity, message):
         with open(MATTERMOST_URL_FILE) as f:
             url = f.read().rstrip("\n")
         emoji = MATTERMOST_EMOJI.get(severity, ":information_source:")
-        ts = time.strftime("%H:%M:%S")
-        line = "{} [{} {}] {}".format(emoji, ts, MATTERMOST_SOURCE, message)
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
         if MATTERMOST_MENTION and severity in MATTERMOST_MENTION_SEVERITIES:
-            line = "{} {}".format(MATTERMOST_MENTION, line)
+            body = "{} {}".format(MATTERMOST_MENTION, message)
+        else:
+            body = message
+        line = "{} [{} {}] {}".format(emoji, ts, MATTERMOST_SOURCE, body)
         requests.post(url, data={"payload": json.dumps({"text": line})}, timeout=10)
     except Exception as e:
         logging.error("notify_mattermost failed: %s", e)

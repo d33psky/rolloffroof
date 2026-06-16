@@ -43,7 +43,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -130,7 +130,7 @@ class Reporter:
         line = title if not body else "{} - {}".format(title, body)
         if self.mention and severity in self.mention_severities:
             line = "{} {}".format(self.mention, line)
-        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]   # HH:MM:SS.mmm (local)
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"   # ISO 8601 UTC
         parts = ["{} [{} {}] {}".format(SEVERITY_EMOJI.get(severity, ":information_source:"),
                                         ts, self.source, line)]
         if state:
