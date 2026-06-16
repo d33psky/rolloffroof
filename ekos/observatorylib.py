@@ -91,6 +91,10 @@ class ObservatoryConfig:
 SEVERITY_EMOJI = {"info": ":information_source:", "warn": ":warning:", "critical": ":rotating_light:"}
 
 
+# NOTE: A minimal inline copy of the POST + emoji + mention logic lives in
+# /home/hans/src/rolloffroof/roof/controller.py (rpi1, Python 3.5.3, no
+# observatorylib deployed). When changing the severity/emoji/mention
+# convention here, update controller.py in lockstep.
 class Reporter:
     """Posts one-line alerts to Mattermost via an incoming-webhook URL.
 

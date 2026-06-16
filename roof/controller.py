@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
+import atexit
+import json
 import threading
 import logging
 import time
 import signal
 import os
 import socket
+import requests
 from flask import Flask, jsonify, request, render_template
 
 if os.uname()[4].startswith("arm"):
@@ -32,6 +35,8 @@ ROOF_MOTOR_START_RELAY = 0
 ROOF_MOTOR_DIRECTION_RELAY = 1
 GREEN_BUTTON = 18
 
+ROOF_TRAVEL_TIMEOUT_S = 70   # measured open/close ~54 s in 2015; abort + alert beyond this
+
 MOUNT_IP = "192.168.100.73"
 MOUNT_PORT = 3490
 
@@ -41,6 +46,49 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='(%(threadName)-10s) %(message)s',
 )
+
+
+# --------------------------------------------------------------------------
+# Mattermost notify (inline)
+#
+# NOTE: This helper duplicates the minimal POST + emoji + mention logic from
+# /home/hans/src/rolloffroof/ekos/observatorylib.py:Reporter (on vostro).
+# rpi1 runs Python 3.5.3 and has no observatorylib deployed, hence this
+# inline copy. When changing the severity/emoji/mention convention, update
+# BOTH files in lockstep.
+# --------------------------------------------------------------------------
+MATTERMOST_URL_FILE = "/root/.mattermosturl"
+MATTERMOST_SOURCE = "roof-controller"
+MATTERMOST_MENTION = "@hans"
+MATTERMOST_MENTION_SEVERITIES = ("critical",)  # warn intentionally NOT mentioned — silent channel log
+MATTERMOST_EMOJI = {
+    "info": ":information_source:",
+    "warn": ":warning:",
+    "critical": ":rotating_light:",
+}
+
+
+def _notify_mattermost_worker(severity, message):
+    try:
+        with open(MATTERMOST_URL_FILE) as f:
+            url = f.read().rstrip("\n")
+        emoji = MATTERMOST_EMOJI.get(severity, ":information_source:")
+        ts = time.strftime("%H:%M:%S")
+        line = "{} [{} {}] {}".format(emoji, ts, MATTERMOST_SOURCE, message)
+        if MATTERMOST_MENTION and severity in MATTERMOST_MENTION_SEVERITIES:
+            line = "{} {}".format(MATTERMOST_MENTION, line)
+        requests.post(url, data={"payload": json.dumps({"text": line})}, timeout=10)
+    except Exception as e:
+        logging.error("notify_mattermost failed: %s", e)
+
+
+def notify_mattermost(severity, message):
+    """Non-blocking: spawns a daemon thread to POST. Returns immediately."""
+    threading.Thread(
+        target=_notify_mattermost_worker,
+        args=(severity, message),
+        daemon=True,
+    ).start()
 
 
 def read_roof_sensor_open():
@@ -232,6 +280,7 @@ def wait_for_button(pin):
             pressed_time += 10
         if pressed_time >= 100:
             print("Pressed for", pressed_time, "ms")
+            notify_mattermost("critical", "Green button pressed ({} ms)".format(pressed_time))
             if next_possible_green_button_action == GREEN_BUTTON_CLOSING:
                 roof_closing = True
             elif next_possible_green_button_action == GREEN_BUTTON_OPENING:
@@ -264,14 +313,18 @@ class RoofControlThread(threading.Thread):
                     next_possible_green_button_action = GREEN_BUTTON_STOP
                     print('')
                     print(time.strftime("%Y%m%d_%H%M%S"), "Wait for an event to stop closing the roof")
+                    motion_start = time.time()
                     while not read_roof_sensor_close() and wiringpi.digitalRead(GREEN_BUTTON) and received_signal == 0:
-                        pass
+                        if time.time() - motion_start > ROOF_TRAVEL_TIMEOUT_S:
+                            notify_mattermost("critical", "Roof motor TIMEOUT after {}s during closing - motor stopped".format(ROOF_TRAVEL_TIMEOUT_S))
+                            break
                     print(time.strftime("%Y%m%d_%H%M%S"), "event to stop closing the roof received")
                     received_signal = 0
                     write_roof_motor_stop()
                     next_possible_green_button_action = GREEN_BUTTON_OPENING
                     if read_roof_sensor_close():
                         print(time.strftime("%Y%m%d_%H%M%S"), "Roof is closed")
+                        notify_mattermost("info", "Roof is closed")
                 else:
                     logging.debug('roof already closed')
             elif roof_opening:
@@ -281,14 +334,18 @@ class RoofControlThread(threading.Thread):
                     next_possible_green_button_action = GREEN_BUTTON_STOP
                     print('')
                     print(time.strftime("%Y%m%d_%H%M%S"), "Wait for an event to stop opening the roof")
+                    motion_start = time.time()
                     while not read_roof_sensor_open() and wiringpi.digitalRead(GREEN_BUTTON) and received_signal == 0:
-                        pass
+                        if time.time() - motion_start > ROOF_TRAVEL_TIMEOUT_S:
+                            notify_mattermost("critical", "Roof motor TIMEOUT after {}s during opening - motor stopped".format(ROOF_TRAVEL_TIMEOUT_S))
+                            break
                     print(time.strftime("%Y%m%d_%H%M%S"), "event to stop opening the roof received")
                     received_signal = 0
                     write_roof_motor_stop()
                     next_possible_green_button_action = GREEN_BUTTON_CLOSING
                     if read_roof_sensor_open():
                         print(time.strftime("%Y%m%d_%H%M%S"), "Roof is open")
+                        notify_mattermost("warn", "Roof is open")
                 else:
                     logging.debug('roof already open')
             else:
@@ -326,6 +383,32 @@ def init():
     else:
         next_possible_green_button_action = GREEN_BUTTON_CLOSING
     write_roof_motor_stop()
+    notify_mattermost("critical", "Controller started")
+
+
+_exit_notify_done = False
+
+
+def _exit_notify():
+    """atexit + SIGTERM handler synchronously posts the exit alert (daemon
+    threads would be killed before delivery, so notify_mattermost's async
+    path isn't safe here)."""
+    global _exit_notify_done
+    if _exit_notify_done:
+        return
+    _exit_notify_done = True
+    _notify_mattermost_worker("critical", "Controller exiting")
+
+
+atexit.register(_exit_notify)
+
+
+def _sigterm_handler(signum, frame):
+    print(time.strftime("%Y%m%d_%H%M%S"), "SIGTERM received, exiting cleanly")
+    raise SystemExit(0)
+
+
+signal.signal(signal.SIGTERM, _sigterm_handler)
 
 
 def main():
