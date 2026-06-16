@@ -7,6 +7,8 @@ import time
 import signal
 import os
 import socket
+import sys
+import traceback
 from datetime import datetime, timezone
 import requests
 from flask import Flask, jsonify, request, render_template
@@ -209,6 +211,7 @@ def roof_motor_close():
             return jsonify({'roof_motor_close': True})
         else:
             logging.debug('mount IS NOT PARKED, REFUSE TO roof_motor_close')
+            notify_mattermost("critical", "API roof_motor_close REFUSED: mount IS NOT PARKED (response={!r})".format(response))
             roof_closing = False
             return jsonify({'roof_motor_close': False})
 
@@ -300,6 +303,14 @@ class RoofControlThread(threading.Thread):
     """ the non-flask thread """
 
     def run(self):
+        try:
+            self._run_loop()
+        except Exception:
+            exc_type, exc_value, exc_tb = sys.exc_info()
+            _crash_notify("RoofControlThread", exc_type, exc_value, exc_tb)
+            raise
+
+    def _run_loop(self):
         logging.debug('roof thread')
         global received_signal
         global next_possible_green_button_action
@@ -317,11 +328,20 @@ class RoofControlThread(threading.Thread):
                     print('')
                     print(time.strftime("%Y%m%d_%H%M%S"), "Wait for an event to stop closing the roof")
                     motion_start = time.time()
-                    while not read_roof_sensor_close() and wiringpi.digitalRead(GREEN_BUTTON) and received_signal == 0:
-                        if time.time() - motion_start > ROOF_TRAVEL_TIMEOUT_S:
+                    exit_reason = None
+                    while exit_reason is None:
+                        if read_roof_sensor_close():
+                            exit_reason = "sensor"
+                        elif not wiringpi.digitalRead(GREEN_BUTTON):
+                            exit_reason = "button"
+                        elif received_signal != 0:
+                            exit_reason = "signal"
+                        elif time.time() - motion_start > ROOF_TRAVEL_TIMEOUT_S:
+                            exit_reason = "timeout"
                             notify_mattermost("critical", "Roof motor TIMEOUT after {}s during closing - motor stopped".format(ROOF_TRAVEL_TIMEOUT_S))
-                            break
-                    print(time.strftime("%Y%m%d_%H%M%S"), "event to stop closing the roof received")
+                    print(time.strftime("%Y%m%d_%H%M%S"), "event to stop closing the roof received: {}".format(exit_reason))
+                    if exit_reason == "button":
+                        notify_mattermost("critical", "Green button pressed during closing - motor stopped")
                     received_signal = 0
                     write_roof_motor_stop()
                     next_possible_green_button_action = GREEN_BUTTON_OPENING
@@ -338,11 +358,20 @@ class RoofControlThread(threading.Thread):
                     print('')
                     print(time.strftime("%Y%m%d_%H%M%S"), "Wait for an event to stop opening the roof")
                     motion_start = time.time()
-                    while not read_roof_sensor_open() and wiringpi.digitalRead(GREEN_BUTTON) and received_signal == 0:
-                        if time.time() - motion_start > ROOF_TRAVEL_TIMEOUT_S:
+                    exit_reason = None
+                    while exit_reason is None:
+                        if read_roof_sensor_open():
+                            exit_reason = "sensor"
+                        elif not wiringpi.digitalRead(GREEN_BUTTON):
+                            exit_reason = "button"
+                        elif received_signal != 0:
+                            exit_reason = "signal"
+                        elif time.time() - motion_start > ROOF_TRAVEL_TIMEOUT_S:
+                            exit_reason = "timeout"
                             notify_mattermost("critical", "Roof motor TIMEOUT after {}s during opening - motor stopped".format(ROOF_TRAVEL_TIMEOUT_S))
-                            break
-                    print(time.strftime("%Y%m%d_%H%M%S"), "event to stop opening the roof received")
+                    print(time.strftime("%Y%m%d_%H%M%S"), "event to stop opening the roof received: {}".format(exit_reason))
+                    if exit_reason == "button":
+                        notify_mattermost("critical", "Green button pressed during opening - motor stopped")
                     received_signal = 0
                     write_roof_motor_stop()
                     next_possible_green_button_action = GREEN_BUTTON_CLOSING
@@ -414,11 +443,48 @@ def _sigterm_handler(signum, frame):
 signal.signal(signal.SIGTERM, _sigterm_handler)
 
 
+def _crash_notify(where, exc_type, exc_value, exc_tb):
+    """Synchronously notify of an unhandled exception with backtrace, then mark
+    the exit-notify as already done so atexit doesn't also post a generic
+    'Controller exiting' for the same crash."""
+    global _exit_notify_done
+    tb_str = "".join(traceback.format_exception(exc_type, exc_value, exc_tb)).rstrip()
+    msg = "Controller CRASHED in {}: {}: {}\n```\n{}\n```".format(
+        where, exc_type.__name__, exc_value, tb_str)
+    if len(msg) > 3500:
+        msg = msg[:3500] + "\n... (truncated)\n```"
+    _notify_mattermost_worker("critical", msg)
+    _exit_notify_done = True
+
+
+def _main_excepthook(exc_type, exc_value, exc_tb):
+    _crash_notify("main", exc_type, exc_value, exc_tb)
+    sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+
+sys.excepthook = _main_excepthook
+
+
+def _exit_motor_stop():
+    """Belt-and-braces: guarantee the motor is OFF on any exit path
+    (clean exit, SIGTERM, crash). Registered LAST so it runs FIRST in atexit's
+    LIFO order — before the (slow) Mattermost POST and before the daemon
+    RoofControlThread is killed by interpreter shutdown."""
+    try:
+        write_roof_motor_stop()
+    except Exception:
+        pass
+
+
+atexit.register(_exit_motor_stop)
+
+
 def main():
     """ main """
     init()
 
     roof_control_thread = RoofControlThread()
+    roof_control_thread.daemon = True   # don't block interpreter shutdown — atexit (_exit_motor_stop) ensures motor is OFF before the daemon is killed
     roof_control_thread.start()
 
     try:
