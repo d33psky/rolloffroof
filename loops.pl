@@ -177,12 +177,16 @@ while (1) {
 
 	printf( strftime("%Y%m%d_%H%M%S", localtime) ." getting data:\n");
 
-# b0rken sensor :(
+# Both indoor/outdoor DHT22 sensors are b0rken — pin 15 (outside, dead since 2020,
+# resurrected via AHT21B at the pole base in readAllMyI2cDevices.c) and pin 16
+# (observatory, reads garbage like Humidity=1.00% and stalls loldht). Read both
+# is disabled here. See ~/infra/docs/astro/todo-options.md for the AHT21B
+# replacement plan.
 #	printf(strftime("%Y%m%d_%H%M%S", localtime) ." read tempandhum-outside pin 15:\n");
 #	readTempAndHumidity("tempandhum-outside", "15", "0.0", "0.0");
 
-	printf(strftime("%Y%m%d_%H%M%S", localtime) ." read tempandhum-observatory pin 16:\n");
-	readTempAndHumidity("tempandhum-observatory", "16", "0.0", "14.0");
+#	printf(strftime("%Y%m%d_%H%M%S", localtime) ." read tempandhum-observatory pin 16:\n");
+#	readTempAndHumidity("tempandhum-observatory", "16", "0.0", "14.0");
 	printf(strftime("%Y%m%d_%H%M%S", localtime) ." read_TSL237_pigpio :\n");
 	system("./read_TSL237_pigpio") == 0 or die "read_TSL237_pigpio failed!";
 	printf(strftime("%Y%m%d_%H%M%S", localtime) ." readAllMyI2cDevices :\n");
