@@ -769,6 +769,7 @@ cloudsensor() {
 	RRD+=("DEF:baa_sky=skytemperature-BAA.rrd:BAA_sky:AVERAGE")
 	RRD+=("DEF:bcc_sky=skytemperature-BCC.rrd:BCC_sky:AVERAGE")
 	RRD+=("DEF:ambient=tempandhum-outside.rrd:temperature:AVERAGE")
+	RRD+=("DEF:dewpoint=tempandhum-outside.rrd:dewpoint:AVERAGE")
 	RRD+=("DEF:heater=cloud-sensor-heater.rrd:state:AVERAGE")
 	# Derived (match the C code's logic exactly)
 	RRD+=("CDEF:cap_t=baa_sensor,bcc_sensor,+,2,/")
@@ -784,12 +785,19 @@ cloudsensor() {
 	RRD+=("VDEF:ambient_max=ambient,MAXIMUM")
 	RRD+=("VDEF:ambient_avg=ambient,AVERAGE")
 	RRD+=("VDEF:ambient_min=ambient,MINIMUM")
+	RRD+=("VDEF:dewpoint_last=dewpoint,LAST")
+	RRD+=("VDEF:dewpoint_max=dewpoint,MAXIMUM")
+	RRD+=("VDEF:dewpoint_avg=dewpoint,AVERAGE")
+	RRD+=("VDEF:dewpoint_min=dewpoint,MINIMUM")
 	RRD+=("VDEF:delta_tlast=delta_t,LAST")
 	RRD+=("VDEF:delta_tmax=delta_t,MAXIMUM")
 	RRD+=("VDEF:delta_tavg=delta_t,AVERAGE")
 	RRD+=("VDEF:delta_tmin=delta_t,MINIMUM")
-	# Heater duty band at bottom 5% of canvas (TICK draws on samples > 0)
-	RRD+=("TICK:heater#FFCC0080:-0.05:'heater on'")
+	# Heater duty band at bottom 5% of canvas. Positive fraction = from
+	# bottom up (rrdtool semantics; -0.05 ended up at the TOP on this
+	# rrdtool version, opposite of what the manpage suggests). Two leading
+	# spaces in the legend keep the swatch from eating the first letter.
+	RRD+=("TICK:heater#FFCC0080:0.05:'  heater on'")
 	# Threshold reference lines
 	RRD+=("HRULE:5#FFA50080:'WET_ON  = 5 K'")
 	RRD+=("HRULE:8#FFA50040:'WET_OFF = 8 K\l'")
@@ -804,6 +812,11 @@ cloudsensor() {
 	RRD+=("GPRINT:ambient_max:'%6.2lf\t'")
 	RRD+=("GPRINT:ambient_avg:'%6.2lf\t'")
 	RRD+=("GPRINT:ambient_min:'%6.2lf\tC\l'")
+	RRD+=("LINE1:dewpoint#00CCCC:'dewpoint (AHT21B)\t\t'")
+	RRD+=("GPRINT:dewpoint_last:'%6.2lf\t'")
+	RRD+=("GPRINT:dewpoint_max:'%6.2lf\t'")
+	RRD+=("GPRINT:dewpoint_avg:'%6.2lf\t'")
+	RRD+=("GPRINT:dewpoint_min:'%6.2lf\tC\l'")
 	RRD+=("LINE2:delta_t#008800:'delta_t = max(cap-sky)\t'")
 	RRD+=("GPRINT:delta_tlast:'%6.2lf\t'")
 	RRD+=("GPRINT:delta_tmax:'%6.2lf\t'")

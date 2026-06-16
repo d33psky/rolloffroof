@@ -19,8 +19,8 @@
 #define HEATER_OFF_K   7.0                  // turn OFF if cap_T - dewpoint >  this (hysteresis)
 #define WET_ON_K       5.0                  // turn ON  if cap_T - sky_T  <  this (foil suspected obstructed by water/snow)
 #define WET_OFF_K      8.0                  // safe to turn off only above this (3 K hysteresis on the wet trigger)
-#define HEATER_SAFETY_MAX_C   50.0          // PVC cap Vicat ~60 °C — latch heater OFF above this
-#define HEATER_SAFETY_HYST_K   5.0          // re-arm safety latch below MAX - HYST (i.e. 45 °C)
+#define HEATER_SAFETY_MAX_C   55.0          // PVC cap Vicat ~60 °C — runaway-only check; passive solar can hit ~54 °C
+#define HEATER_SAFETY_HYST_K   5.0          // re-arm safety latch below MAX - HYST (i.e. 50 °C)
 
 void rrdUpdateSomething(char *something, char *rrdupdate) {
 	int shm_fd;
@@ -251,8 +251,12 @@ int loadSafetyTripped(void) {
 // to +5 K and look like a clear sky).
 int decideHeater(double cap_T, double dewpoint, double delta_t_max,
                  int prev_state, int *safety_tripped) {
-    // 1. SAFETY latch (signed comparisons work for any cap_T value)
-    if (cap_T > HEATER_SAFETY_MAX_C) {
+    // 1. SAFETY latch — only trip when the HEATER is responsible.
+    // Passive solar load can push cap_T to ~54 °C on a sunny noon (observed
+    // 2026-06-16 at 53.6 °C, heater off) without anything being wrong, so
+    // the trip is gated on prev_state. Re-arm (clear) is unconditional —
+    // once cap cools enough, the latch always releases.
+    if (prev_state == 1 && cap_T > HEATER_SAFETY_MAX_C) {
         *safety_tripped = 1;
     } else if (cap_T < HEATER_SAFETY_MAX_C - HEATER_SAFETY_HYST_K) {
         *safety_tripped = 0;
@@ -371,8 +375,8 @@ int main(int argc, char **argv)
         new_state = decideHeater(cap_T, ext_DP, delta_t_max, prev_state, &safety_tripped);
     } else {
         // Fail-safe: humidity unknown → heater OFF. Still maintain the cap-T
-        // safety latch (it doesn't depend on dewpoint).
-        if (cap_T > HEATER_SAFETY_MAX_C) {
+        // safety latch — same heater-on-conditional trip + unconditional clear.
+        if (prev_state == 1 && cap_T > HEATER_SAFETY_MAX_C) {
             safety_tripped = 1;
         } else if (cap_T < HEATER_SAFETY_MAX_C - HEATER_SAFETY_HYST_K) {
             safety_tripped = 0;
