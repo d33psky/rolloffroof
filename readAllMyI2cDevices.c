@@ -15,8 +15,12 @@
 #define AVG 1   //averaging samples
 
 #define HEATER_PIN     RPI_V2_GPIO_P5_03   // GPIO28 / P5-3 -> TIP120 base (cloud-sensor heater). NOT P5_04 — that is GPIO29 = wPi 18 = the green-button line read by controller.py (root cause of 2026-06-15 roof self-cycling incident).
-#define HEATER_ON_K    5.0                  // turn ON  if cap_T - dewpoint <  this
+#define HEATER_ON_K    5.0                  // turn ON  if cap_T - dewpoint <  this (dewpoint margin)
 #define HEATER_OFF_K   7.0                  // turn OFF if cap_T - dewpoint >  this (hysteresis)
+#define WET_ON_K       5.0                  // turn ON  if cap_T - sky_T  <  this (foil suspected obstructed by water/snow)
+#define WET_OFF_K      8.0                  // safe to turn off only above this (3 K hysteresis on the wet trigger)
+#define HEATER_SAFETY_MAX_C   50.0          // PVC cap Vicat ~60 °C — latch heater OFF above this
+#define HEATER_SAFETY_HYST_K   5.0          // re-arm safety latch below MAX - HYST (i.e. 45 °C)
 
 void rrdUpdateSomething(char *something, char *rrdupdate) {
 	int shm_fd;
@@ -229,11 +233,41 @@ int loadHeaterState(void) {
     return (b[0] == '1') ? 1 : 0;
 }
 
-int decideHeater(double cap_T, double dewpoint, int prev_state) {
+int loadSafetyTripped(void) {
+    int fd = shm_open("value_cloud-sensor-heater_safety_tripped", O_RDONLY, 0666);
+    if (fd < 0) return 0;
+    char b[4] = {0};
+    read(fd, b, 3);
+    close(fd);
+    return (b[0] == '1') ? 1 : 0;
+}
+
+// Heater v2: dewpoint margin OR sky-delta low → ON. Both must be above their
+// OFF thresholds to turn off. Safety: if cap_T exceeds HEATER_SAFETY_MAX_C
+// the heater is force-latched OFF until cap_T drops HYST below MAX.
+// All comparisons are signed — cap_T, dewpoint, and delta_t_max may all go
+// negative in winter; abs() is intentionally NOT used (a busted-sensor
+// delta_t of -5 K should stay -5 K and trip the wet-trigger, not be flipped
+// to +5 K and look like a clear sky).
+int decideHeater(double cap_T, double dewpoint, double delta_t_max,
+                 int prev_state, int *safety_tripped) {
+    // 1. SAFETY latch (signed comparisons work for any cap_T value)
+    if (cap_T > HEATER_SAFETY_MAX_C) {
+        *safety_tripped = 1;
+    } else if (cap_T < HEATER_SAFETY_MAX_C - HEATER_SAFETY_HYST_K) {
+        *safety_tripped = 0;
+    }
+    if (*safety_tripped) return 0;
+
     double margin = cap_T - dewpoint;
-    if (margin < HEATER_ON_K)  return 1;
-    if (margin > HEATER_OFF_K) return 0;
-    return prev_state;   // inside hysteresis band -> keep previous
+
+    // 2. ON triggers (any)
+    if (delta_t_max < WET_ON_K)   return 1;   // foil obstructed (wet / snow-covered)
+    if (margin     < HEATER_ON_K) return 1;   // dewpoint margin too small
+    // 3. OFF triggers (both required)
+    if (delta_t_max > WET_OFF_K && margin > HEATER_OFF_K) return 0;
+    // 4. else: hysteresis hold
+    return prev_state;
 }
 
 void publishHeaterState(int state) {
@@ -242,6 +276,27 @@ void publishHeaterState(int state) {
     rrdUpdateSomething("cloud-sensor-heater", rrdupdate);
     sprintf(v, "%d\n", state);
     valueUpdate("cloud-sensor-heater", "state", v);
+}
+
+void publishSafetyTripped(int tripped) {
+    char v[8];
+    sprintf(v, "%d\n", tripped);
+    valueUpdate("cloud-sensor-heater", "safety_tripped", v);
+}
+
+// Drop a one-shot flag at /dev/shm/cloud_sensor_safety_event whenever the
+// safety latch transitions (0->1 trip, 1->0 recover). loops.pl picks the
+// flag up on its next cycle, POSTs it to Mattermost (critical, @hans), and
+// unlinks. So no spam: one message per actual transition.
+void writeSafetyEvent(int now_tripped, double cap_T) {
+    FILE *f = fopen("/dev/shm/cloud_sensor_safety_event", "w");
+    if (!f) return;
+    if (now_tripped) {
+        fprintf(f, "TRIPPED cap_T=%.2fC (limit=%.1fC)", cap_T, (double)HEATER_SAFETY_MAX_C);
+    } else {
+        fprintf(f, "RECOVERED cap_T=%.2fC (re-arm below %.1fC)", cap_T, (double)HEATER_SAFETY_MAX_C - (double)HEATER_SAFETY_HYST_K);
+    }
+    fclose(f);
 }
 
 int readBH1750(int address) {
@@ -303,16 +358,34 @@ int main(int argc, char **argv)
     readMLX  (0x5b, "BCC", &bcc_T, &bcc_sky);
     aht_ok = readAHT21B(0x38, &ext_T, &ext_RH, &ext_DP);
 
-    int prev_state = loadHeaterState();
+    int prev_state          = loadHeaterState();
+    int prev_safety_tripped = loadSafetyTripped();
+    int safety_tripped      = prev_safety_tripped;
+    double cap_T            = (baa_T + bcc_T) / 2.0;
+    double delta_t_baa      = baa_T - baa_sky;
+    double delta_t_bcc      = bcc_T - bcc_sky;
+    double delta_t_max      = (delta_t_baa > delta_t_bcc) ? delta_t_baa : delta_t_bcc;
     int new_state;
+
     if (aht_ok) {
-        double cap_T = (baa_T + bcc_T) / 2.0;
-        new_state = decideHeater(cap_T, ext_DP, prev_state);
+        new_state = decideHeater(cap_T, ext_DP, delta_t_max, prev_state, &safety_tripped);
     } else {
-        new_state = 0;                  // fail-safe: heater OFF when humidity unknown
+        // Fail-safe: humidity unknown → heater OFF. Still maintain the cap-T
+        // safety latch (it doesn't depend on dewpoint).
+        if (cap_T > HEATER_SAFETY_MAX_C) {
+            safety_tripped = 1;
+        } else if (cap_T < HEATER_SAFETY_MAX_C - HEATER_SAFETY_HYST_K) {
+            safety_tripped = 0;
+        }
+        new_state = 0;
     }
+
     bcm2835_gpio_write(HEATER_PIN, new_state ? HIGH : LOW);
     publishHeaterState(new_state);
+    publishSafetyTripped(safety_tripped);
+    if (safety_tripped != prev_safety_tripped) {
+        writeSafetyEvent(safety_tripped, cap_T);
+    }
 
     bcm2835_i2c_end();
     bcm2835_close();

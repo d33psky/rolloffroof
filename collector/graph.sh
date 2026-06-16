@@ -740,6 +740,78 @@ skytemp() {
 	eval ${RRD[@]}
 }
 
+# Cloud-sensor heater duty + the signals that drive it. Single panel:
+#   - cap_T = avg of BAA+BCC sensor (= cap surface, what the heater warms)
+#   - ambient (AHT21B)             = baseline
+#   - delta_t = max(cap - sky)     = the new wet-foil indicator
+#   - HRULEs at WET_ON_K=5 and WET_OFF_K=8 (the new heater-v2 thresholds)
+#   - heater state shown as a faint orange band at the BOTTOM of the canvas
+#     via TICK so you can read the duty timeline at a glance.
+# Dewpoint intentionally NOT plotted here (already on the obsenv1 graph).
+cloudsensor() {
+	local size="$1"
+	local period="$2"
+	declare -a RRD
+	RRD=("rrdtool graph")
+	RRD+=("-A ${TARGET_DIR}/${FUNCNAME}_${size}_${period}.png")
+	RRD+=("--start $period")
+	RRD+=("--title 'Cloud sensor heater, $period'")
+	RRD+=("--vertical-label 'temperature [C] / delta_t [K]'")
+	RRD+=("--right-axis 1:0")
+	if [[ $size == "large" ]]; then
+		RRD+=("--width 1000 --height 500")
+	fi
+	if [[ $period == "now-1d" ]]; then
+		RRD+=("--x-grid DAY:1:HOUR:1:HOUR:1:0:%H")
+	fi
+	RRD+=("DEF:baa_sensor=skytemperature-BAA.rrd:BAA_sensor:AVERAGE")
+	RRD+=("DEF:bcc_sensor=skytemperature-BCC.rrd:BCC_sensor:AVERAGE")
+	RRD+=("DEF:baa_sky=skytemperature-BAA.rrd:BAA_sky:AVERAGE")
+	RRD+=("DEF:bcc_sky=skytemperature-BCC.rrd:BCC_sky:AVERAGE")
+	RRD+=("DEF:ambient=tempandhum-outside.rrd:temperature:AVERAGE")
+	RRD+=("DEF:heater=cloud-sensor-heater.rrd:state:AVERAGE")
+	# Derived (match the C code's logic exactly)
+	RRD+=("CDEF:cap_t=baa_sensor,bcc_sensor,+,2,/")
+	RRD+=("CDEF:dt_baa=baa_sensor,baa_sky,-")
+	RRD+=("CDEF:dt_bcc=bcc_sensor,bcc_sky,-")
+	RRD+=("CDEF:delta_t=dt_baa,dt_bcc,MAX")
+	# Legend stats
+	RRD+=("VDEF:cap_tlast=cap_t,LAST")
+	RRD+=("VDEF:cap_tmax=cap_t,MAXIMUM")
+	RRD+=("VDEF:cap_tavg=cap_t,AVERAGE")
+	RRD+=("VDEF:cap_tmin=cap_t,MINIMUM")
+	RRD+=("VDEF:ambient_last=ambient,LAST")
+	RRD+=("VDEF:ambient_max=ambient,MAXIMUM")
+	RRD+=("VDEF:ambient_avg=ambient,AVERAGE")
+	RRD+=("VDEF:ambient_min=ambient,MINIMUM")
+	RRD+=("VDEF:delta_tlast=delta_t,LAST")
+	RRD+=("VDEF:delta_tmax=delta_t,MAXIMUM")
+	RRD+=("VDEF:delta_tavg=delta_t,AVERAGE")
+	RRD+=("VDEF:delta_tmin=delta_t,MINIMUM")
+	# Heater duty band at bottom 5% of canvas (TICK draws on samples > 0)
+	RRD+=("TICK:heater#FFCC0080:-0.05:'heater on'")
+	# Threshold reference lines
+	RRD+=("HRULE:5#FFA50080:'WET_ON  = 5 K'")
+	RRD+=("HRULE:8#FFA50040:'WET_OFF = 8 K\l'")
+	RRD+=("COMMENT:'\t\t\t\t\tlast\tmax\tavg\tmin\l'")
+	RRD+=("LINE2:cap_t#FF0000:'cap T (avg BAA+BCC sensor)\t'")
+	RRD+=("GPRINT:cap_tlast:'%6.2lf\t'")
+	RRD+=("GPRINT:cap_tmax:'%6.2lf\t'")
+	RRD+=("GPRINT:cap_tavg:'%6.2lf\t'")
+	RRD+=("GPRINT:cap_tmin:'%6.2lf\tC\l'")
+	RRD+=("LINE1:ambient#0000FF:'ambient (AHT21B)\t\t'")
+	RRD+=("GPRINT:ambient_last:'%6.2lf\t'")
+	RRD+=("GPRINT:ambient_max:'%6.2lf\t'")
+	RRD+=("GPRINT:ambient_avg:'%6.2lf\t'")
+	RRD+=("GPRINT:ambient_min:'%6.2lf\tC\l'")
+	RRD+=("LINE2:delta_t#008800:'delta_t = max(cap-sky)\t'")
+	RRD+=("GPRINT:delta_tlast:'%6.2lf\t'")
+	RRD+=("GPRINT:delta_tmax:'%6.2lf\t'")
+	RRD+=("GPRINT:delta_tavg:'%6.2lf\t'")
+	RRD+=("GPRINT:delta_tmin:'%6.2lf\tK\l'")
+	eval ${RRD[@]}
+}
+
 ups() {
 	local size="$1"
 	local period="$2"
@@ -848,6 +920,11 @@ all)
 	skytemp large now-1w
 	skytemp large now-1m
 	skytemp large now-1y
+	cloudsensor small now-1d
+	cloudsensor large now-1d
+	cloudsensor large now-1w
+	cloudsensor large now-1m
+	cloudsensor large now-1y
 	ups small now-1d
 	ups large now-1d
 	ups large now-1w
@@ -899,6 +976,11 @@ skytemp)
 	skytemp small now-1d
 	skytemp large now-1d
 	skytemp large now-1w
+	;;
+cloudsensor)
+	cloudsensor small now-1d
+	cloudsensor large now-1d
+	cloudsensor large now-1w
 	;;
 ht)
 	sqm large now-1m

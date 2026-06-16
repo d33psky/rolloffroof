@@ -133,6 +133,45 @@ sub readUPS {
 
 }
 
+# Drain /dev/shm/cloud_sensor_safety_event if readAllMyI2cDevices wrote one.
+# Posts a critical Mattermost alert (@hans pushes to phone), then unlinks
+# the flag so we don't spam — readAllMyI2cDevices only writes on transition.
+sub checkSafetyAlert {
+	my $flag = "/dev/shm/cloud_sensor_safety_event";
+	return unless -e $flag;
+
+	open my $fh, '<', $flag or do { unlink $flag; return; };
+	my $body = do { local $/; <$fh> };
+	close $fh;
+	chomp $body;
+
+	my $url_file = '/root/.mattermosturl-observatory';
+	unless (-e $url_file) {
+		warn "$url_file missing, dropping safety alert: $body\n";
+		unlink $flag;
+		return;
+	}
+	open my $uf, '<', $url_file or do { unlink $flag; return; };
+	my $url = <$uf>;
+	close $uf;
+	chomp $url;
+
+	# Match the format used by controller.py + observatorylib:
+	# ":rotating_light: [ISO8601-UTC source] @hans message"
+	my $ts = strftime("%Y-%m-%dT%H:%M:%S", gmtime) . ".000Z";
+	# JSON-escape the body (it's controlled by us but be defensive)
+	my $body_json = $body;
+	$body_json =~ s/\\/\\\\/g;
+	$body_json =~ s/"/\\"/g;
+	my $text = ":rotating_light: [$ts cloud-sensor] \@hans Cap over-temp safety: $body_json";
+	my $payload = qq({"text": "$text"});
+
+	# List-form system() bypasses the shell -> no quoting pitfalls
+	system("curl", "-s", "--max-time", "10",
+	       "--data-urlencode", "payload=$payload", $url);
+	unlink $flag;
+}
+
 while (1) {
 	my $startdate = time;
 
@@ -148,6 +187,7 @@ while (1) {
 	system("./read_TSL237_pigpio") == 0 or die "read_TSL237_pigpio failed!";
 	printf(strftime("%Y%m%d_%H%M%S", localtime) ." readAllMyI2cDevices :\n");
 	system("./readAllMyI2cDevices") == 0 or die "readAllMyI2cDevices failed!";
+	checkSafetyAlert();
 	printf(strftime("%Y%m%d_%H%M%S", localtime) ." read ups :\n");
 	readUPS("ups");
 
