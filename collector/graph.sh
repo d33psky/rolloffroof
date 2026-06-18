@@ -3,6 +3,12 @@
 WHICHONE="$1"
 TARGET_DIR="/webs/lambermont.dyndns.org/www/astro/rrd"
 
+# Timezone for ALL rendered graphs. rrdtool reads the TZ env var and
+# stamps the x-axis labels accordingly. Set to "UTC" to keep the
+# native sensor clocks; set to "Europe/Amsterdam" for local (CET/CEST).
+TZ_DISPLAY="Europe/Amsterdam"
+export TZ="$TZ_DISPLAY"
+
 if [ -z "$WHICHONE" ]; then
 	WHICHONE="all"
 fi
@@ -771,11 +777,19 @@ cloudsensor() {
 	RRD+=("DEF:ambient=tempandhum-outside.rrd:temperature:AVERAGE")
 	RRD+=("DEF:dewpoint=tempandhum-outside.rrd:dewpoint:AVERAGE")
 	RRD+=("DEF:heater=cloud-sensor-heater.rrd:state:AVERAGE")
+	RRD+=("DEF:wet_active=cloud-sensor-heater-detail.rrd:wet_active:AVERAGE")
+	RRD+=("DEF:margin_active=cloud-sensor-heater-detail.rrd:margin_active:AVERAGE")
 	# Derived (match the C code's logic exactly)
 	RRD+=("CDEF:cap_t=baa_sensor,bcc_sensor,+,2,/")
 	RRD+=("CDEF:dt_baa=baa_sensor,baa_sky,-")
 	RRD+=("CDEF:dt_bcc=bcc_sensor,bcc_sky,-")
 	RRD+=("CDEF:delta_t=dt_baa,dt_bcc,MAX")
+	# Dewpoint-margin trigger thresholds (operate on cap_T relative to
+	# dewpoint). These are RED-FAMILY (close to cap_T) so the connection
+	# is visually obvious: when cap_T crosses below dew_plus_on the
+	# margin trigger fires; rising above dew_plus_off releases it.
+	RRD+=("CDEF:dew_plus_on=dewpoint,5,+")
+	RRD+=("CDEF:dew_plus_off=dewpoint,7,+")
 	# Legend stats
 	RRD+=("VDEF:cap_tlast=cap_t,LAST")
 	RRD+=("VDEF:cap_tmax=cap_t,MAXIMUM")
@@ -793,14 +807,21 @@ cloudsensor() {
 	RRD+=("VDEF:delta_tmax=delta_t,MAXIMUM")
 	RRD+=("VDEF:delta_tavg=delta_t,AVERAGE")
 	RRD+=("VDEF:delta_tmin=delta_t,MINIMUM")
-	# Heater duty band at bottom 5% of canvas. Positive fraction = from
-	# bottom up (rrdtool semantics; -0.05 ended up at the TOP on this
-	# rrdtool version, opposite of what the manpage suggests). Two leading
-	# spaces in the legend keep the swatch from eating the first letter.
-	RRD+=("TICK:heater#FFCC0080:0.05:'  heater on'")
-	# Threshold reference lines
-	RRD+=("HRULE:5#FFA50080:'WET_ON  = 5 K'")
-	RRD+=("HRULE:8#FFA50040:'WET_OFF = 8 K\l'")
+	# Heater output (black, bottom) + trigger-reason bands stacked above:
+	#   0.02 = heater actually firing (black)
+	#   0.06 = WET trigger active right now    (green-family)
+	#   0.10 = MARGIN trigger active right now (red-family, like dew_plus_on)
+	# Reading top-down mirrors the data lines: red→margin, green→wet, black=output.
+	# Trigger bands can both be 0 while heater=1 -> that's a hysteresis hold.
+	RRD+=("TICK:heater#00000080:0.02:'     heater on'")
+	RRD+=("TICK:wet_active#00880060:0.06:'     wet trig'")
+	RRD+=("TICK:margin_active#FF666660:0.10:'     margin trig'")
+	# Dewpoint-margin trigger curves (red-family, like cap_T which they affect)
+	RRD+=("LINE1:dew_plus_on#FF666680:'cap_T target ON  (dewpoint + 5K)'")
+	RRD+=("LINE1:dew_plus_off#FF666640:'cap_T target OFF (dewpoint + 7K)'")
+	# Sky-delta (WET) trigger thresholds (green-family, like delta_t which they affect)
+	RRD+=("HRULE:5#00880040:'WET_ON  = 5 K  (delta_t)'")
+	RRD+=("HRULE:8#00880020:'WET_OFF = 8 K  (delta_t)\l'")
 	RRD+=("COMMENT:'\t\t\t\t\tlast\tmax\tavg\tmin\l'")
 	RRD+=("LINE2:cap_t#FF0000:'cap T (avg BAA+BCC sensor)\t'")
 	RRD+=("GPRINT:cap_tlast:'%6.2lf\t'")

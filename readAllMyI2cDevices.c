@@ -288,6 +288,22 @@ void publishSafetyTripped(int tripped) {
     valueUpdate("cloud-sensor-heater", "safety_tripped", v);
 }
 
+// Publish the RAW trigger conditions (independent of hysteresis state) so
+// the graph can colour the heater band by reason. wet_active / margin_active
+// are 1 when that trigger's "ON" predicate evaluates true RIGHT NOW. Either
+// can be 1 while the heater itself is off (e.g. during the hysteresis
+// dead-band), or both 0 while the heater is on (hysteresis hold). Goes to a
+// new RRD cloud-sensor-heater-detail.rrd with two GAUGE 0..1 DSs.
+void publishTriggerDetail(int wet_active, int margin_active) {
+    char rrdupdate[160], v[8];
+    sprintf(rrdupdate,
+            "update cloud-sensor-heater-detail.rrd -t wet_active:margin_active N:%d:%d\n",
+            wet_active, margin_active);
+    rrdUpdateSomething("cloud-sensor-heater-detail", rrdupdate);
+    sprintf(v, "%d\n", wet_active);    valueUpdate("cloud-sensor-heater", "wet_active",    v);
+    sprintf(v, "%d\n", margin_active); valueUpdate("cloud-sensor-heater", "margin_active", v);
+}
+
 // Drop a one-shot flag at /dev/shm/cloud_sensor_safety_event whenever the
 // safety latch transitions (0->1 trip, 1->0 recover). loops.pl picks the
 // flag up on its next cycle, POSTs it to Mattermost (critical, @hans), and
@@ -384,9 +400,15 @@ int main(int argc, char **argv)
         new_state = 0;
     }
 
+    // Raw trigger conditions (for diagnostic colouring on the graph).
+    // wet_active needs no humidity sensor; margin_active does.
+    int wet_active    = (delta_t_max < WET_ON_K) ? 1 : 0;
+    int margin_active = (aht_ok && (cap_T - ext_DP) < HEATER_ON_K) ? 1 : 0;
+
     bcm2835_gpio_write(HEATER_PIN, new_state ? HIGH : LOW);
     publishHeaterState(new_state);
     publishSafetyTripped(safety_tripped);
+    publishTriggerDetail(wet_active, margin_active);
     if (safety_tripped != prev_safety_tripped) {
         writeSafetyEvent(safety_tripped, cap_T);
     }
