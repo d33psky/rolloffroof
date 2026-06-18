@@ -761,7 +761,7 @@ cloudsensor() {
 	RRD=("rrdtool graph")
 	RRD+=("-A ${TARGET_DIR}/${FUNCNAME}_${size}_${period}.png")
 	RRD+=("--start $period")
-	RRD+=("--title 'Cloud sensor heater, $period'")
+	RRD+=("--title 'Cloud sensor with heater, $period'")
 	RRD+=("--vertical-label 'temperature [C] / delta_t [K]'")
 	RRD+=("--right-axis 1:0")
 	if [[ $size == "large" ]]; then
@@ -807,23 +807,32 @@ cloudsensor() {
 	RRD+=("VDEF:delta_tmax=delta_t,MAXIMUM")
 	RRD+=("VDEF:delta_tavg=delta_t,AVERAGE")
 	RRD+=("VDEF:delta_tmin=delta_t,MINIMUM")
-	# Heater output (black, bottom) + trigger-reason bands stacked above:
-	#   0.02 = heater actually firing (black)
-	#   0.06 = WET trigger active right now    (green-family)
-	#   0.10 = MARGIN trigger active right now (red-family, like dew_plus_on)
-	# Reading top-down mirrors the data lines: red→margin, green→wet, black=output.
-	# Trigger bands can both be 0 while heater=1 -> that's a hysteresis hold.
-	RRD+=("TICK:heater#00000080:0.02:'     heater on'")
-	RRD+=("TICK:wet_active#00880060:0.06:'     wet trig'")
-	RRD+=("TICK:margin_active#FF666660:0.10:'     margin trig'")
+	# Heater output (black) + trigger-reason bands stacked above. TICK draws
+	# from y-axis-bottom up to fraction*canvas-height, so when multiple
+	# TICKs are active for the same sample they STACK visually — the band
+	# height encodes the trigger cause:
+	#   heater alone (hysteresis hold) → short  black band (0.00 - 0.02)
+	#   heater + wet                   → medium black+green (up to 0.06)
+	#   heater + wet + margin          → tall   black+green+pink (up to 0.10)
+	# So at a glance, taller = more triggers active.
+	#
+	# Legend swatch padding uses NBSP (U+00A0) instead of regular space:
+	# bash collapses runs of regular spaces to a single one via word-
+	# splitting at IFS before eval runs the rrdtool command. NBSP isn't
+	# in IFS, so it survives, and rrdtool renders it as visible whitespace.
+	local nbsp=$'\xc2\xa0'
+	local pad="${nbsp}${nbsp}"
+	RRD+=("TICK:heater#00000080:0.02:'${pad}heater on'")
+	RRD+=("TICK:wet_active#00880060:0.06:'${pad}wet trig'")
+	RRD+=("TICK:margin_active#FF666660:0.10:'${pad}dew trig'")
 	# Dewpoint-margin trigger curves (red-family, like cap_T which they affect)
-	RRD+=("LINE1:dew_plus_on#FF666680:'cap_T target ON  (dewpoint + 5K)'")
-	RRD+=("LINE1:dew_plus_off#FF666640:'cap_T target OFF (dewpoint + 7K)'")
+	RRD+=("LINE1:dew_plus_on#FF666680:'cap_T ON  (dewpoint+5K)'")
+	RRD+=("LINE1:dew_plus_off#FF666640:'cap_T OFF (dewpoint+7K)'")
 	# Sky-delta (WET) trigger thresholds (green-family, like delta_t which they affect)
-	RRD+=("HRULE:5#00880040:'WET_ON  = 5 K  (delta_t)'")
-	RRD+=("HRULE:8#00880020:'WET_OFF = 8 K  (delta_t)\l'")
+	RRD+=("HRULE:5#00880040:'wet ON  = 5K (delta_t)'")
+	RRD+=("HRULE:8#00880020:'wet OFF = 8K (delta_t)\l'")
 	RRD+=("COMMENT:'\t\t\t\t\tlast\tmax\tavg\tmin\l'")
-	RRD+=("LINE2:cap_t#FF0000:'cap T (avg BAA+BCC sensor)\t'")
+	RRD+=("LINE2:cap_t#FF0000:'cap_T (avg BAA+BCC sensor)\t'")
 	RRD+=("GPRINT:cap_tlast:'%6.2lf\t'")
 	RRD+=("GPRINT:cap_tmax:'%6.2lf\t'")
 	RRD+=("GPRINT:cap_tavg:'%6.2lf\t'")
