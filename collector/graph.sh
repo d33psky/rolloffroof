@@ -837,10 +837,10 @@ cloudsensor() {
 	RRD+=("CDEF:dew_only=heater,margin_active,*,1,wet_active,-,*")
 	RRD+=("CDEF:both_trig=heater,wet_active,*,margin_active,*")
 	# TICK at canvas fractions — heights encode "how many triggers driving"
-	RRD+=("TICK:hyst_hold#606060:0.02:'${pad}hyst hold'")
-	RRD+=("TICK:wet_only#226622:0.04:'${pad}wet only'")
-	RRD+=("TICK:dew_only#993333:0.04:'${pad}dew only'")
-	RRD+=("TICK:both_trig#DD7700:0.06:'${pad}both trig'")
+	RRD+=("TICK:hyst_hold#606060:0.02:'${pad}hyst'")
+	RRD+=("TICK:wet_only#226622:0.04:'${pad}wet'")
+	RRD+=("TICK:dew_only#993333:0.04:'${pad}dew'")
+	RRD+=("TICK:both_trig#DD7700:0.06:'${pad}wet+dew'")
 	# Top-of-canvas indicators. Two mutually-exclusive states (when SQM
 	# says dark) plus nothing-drawn when sky is bright. Hysteresis from
 	# query_sky_and_obsy_conditions.py intentionally NOT applied — we
@@ -856,14 +856,14 @@ cloudsensor() {
 	RRD+=("CDEF:safe_imaging=imaging_dark,infrared_clear,*")
 	# Render: dark-but-cloudy as a narrow midnight-blue band, safe-to-image
 	# as a wider steel-blue band. Reader scans top: nothing/dark-only/safe.
-	RRD+=("TICK:dark_only#191970:-0.04:'${pad}dark sky'")
-	RRD+=("TICK:safe_imaging#4682B4:-0.07:'${pad}safe imaging (dark+clear)'")
+	RRD+=("TICK:dark_only#191970:-0.04:'${pad}dark'")
+	RRD+=("TICK:safe_imaging#4682B4:-0.07:'${pad}safe'")
 	# Dewpoint-margin trigger curves (red-family, like cap_T which they affect)
-	RRD+=("LINE1:dew_plus_on#FF666680:'cap_T ON  (dewpoint+5K)'")
-	RRD+=("LINE1:dew_plus_off#FF666640:'cap_T OFF (dewpoint+7K)'")
+	RRD+=("LINE1:dew_plus_on#FF666680:'cap_T ON dp+5K'")
+	RRD+=("LINE1:dew_plus_off#FF666640:'cap_T OFF dp+7K)'")
 	# Sky-delta (WET) trigger thresholds (green-family, like delta_t which they affect)
-	RRD+=("HRULE:5#00880040:'wet ON  = 5K (delta_t)'")
-	RRD+=("HRULE:8#00880020:'wet OFF = 8K (delta_t)\l'")
+	RRD+=("HRULE:5#00880040:'wet ON 5Kdt'")
+	RRD+=("HRULE:8#00880020:'wet OFF 8Kdt\l'")
 	RRD+=("COMMENT:'\t\t\t\t\tlast\tmax\tavg\tmin\l'")
 	RRD+=("LINE2:cap_t#FF0000:'cap_T (avg BAA+BCC sensor)\t'")
 	RRD+=("GPRINT:cap_tlast:'%6.2lf\t'")
