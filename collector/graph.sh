@@ -841,9 +841,23 @@ cloudsensor() {
 	RRD+=("TICK:wet_only#226622:0.04:'${pad}wet only'")
 	RRD+=("TICK:dew_only#993333:0.04:'${pad}dew only'")
 	RRD+=("TICK:both_trig#DD7700:0.06:'${pad}both trig'")
-	# Top-of-canvas "imaging dark" indicator (SQM >= 17.5)
+	# Top-of-canvas indicators. Two mutually-exclusive states (when SQM
+	# says dark) plus nothing-drawn when sky is bright. Hysteresis from
+	# query_sky_and_obsy_conditions.py intentionally NOT applied — we
+	# want the raw thresholds for the diagnostic.
+	#   SQM        ≥ 17.5 mag/arcsec^2          → "dark sky"
+	#   delta_t    ≥ 13.5 K  (avg of BAA=13 and BCC=14)  → "clear sky"
+	#   dark AND clear                          → "safe imaging"
 	RRD+=("CDEF:imaging_dark=sqm,17.5,GE")
-	RRD+=("TICK:imaging_dark#191970:-0.04:'${pad}imaging dark (SQM>=17.5)'")
+	RRD+=("CDEF:infrared_clear=delta_t,13.5,GE")
+	# Mutually-exclusive top states (only one fires per sample, max).
+	# RPN has no NOT operator; "1, x, -" achieves the same.
+	RRD+=("CDEF:dark_only=imaging_dark,1,infrared_clear,-,*")
+	RRD+=("CDEF:safe_imaging=imaging_dark,infrared_clear,*")
+	# Render: dark-but-cloudy as a narrow midnight-blue band, safe-to-image
+	# as a wider steel-blue band. Reader scans top: nothing/dark-only/safe.
+	RRD+=("TICK:dark_only#191970:-0.04:'${pad}dark sky'")
+	RRD+=("TICK:safe_imaging#4682B4:-0.07:'${pad}safe imaging (dark+clear)'")
 	# Dewpoint-margin trigger curves (red-family, like cap_T which they affect)
 	RRD+=("LINE1:dew_plus_on#FF666680:'cap_T ON  (dewpoint+5K)'")
 	RRD+=("LINE1:dew_plus_off#FF666640:'cap_T OFF (dewpoint+7K)'")
