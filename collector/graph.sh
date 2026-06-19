@@ -808,30 +808,39 @@ cloudsensor() {
 	RRD+=("VDEF:delta_tmax=delta_t,MAXIMUM")
 	RRD+=("VDEF:delta_tavg=delta_t,AVERAGE")
 	RRD+=("VDEF:delta_tmin=delta_t,MINIMUM")
-	# Bottom-of-canvas stacked status bands:
-	#   heater output (dark gray) + wet trigger (green) + margin trigger (red)
-	# Each contributes a 2 °C band when active, stacked additively (AREA :STACK)
-	# so the visible top of the stack genuinely shows "how many causes are
-	# driving the heater right now". heater alone (hysteresis hold) = 2 °C
-	# tall; heater + wet = 4; heater + wet + margin = 6.
+	# Bottom-of-canvas status bands. Mutually-exclusive CDEFs split the
+	# (heater × wet × margin) state space into 4 cases, each rendered via
+	# TICK at its own canvas-fraction height. Because the CDEFs are
+	# mutually exclusive (only one is 1 per sample), the bands never
+	# visually overlap, and the band height encodes "how many triggers
+	# are driving the heater":
+	#   heater on, no raw trigger     → 0.02 gray  (hysteresis hold)
+	#   heater + wet only             → 0.04 green
+	#   heater + dew (margin) only    → 0.04 red
+	#   heater + both                 → 0.06 amber (most demand)
+	# TICK uses canvas fractions, so these bands sit at the bottom of the
+	# image regardless of y-axis range — won't compete with cap_T even
+	# in deep winter when ambient is below 0 °C.
 	#
 	# Top-of-canvas band:
-	#   imaging-dark (midnight blue) — drawn via TICK with negative fraction
-	#   when SQM ≥ 17.5 mag/arcsec² (the threshold from
-	#   query_sky_and_obsy_conditions.py without hysteresis).
+	#   imaging-dark (midnight blue) — TICK with negative fraction when
+	#   SQM ≥ 17.5 (threshold from query_sky_and_obsy_conditions.py
+	#   without the hysteresis adjustment).
 	#
-	# Legend swatch padding uses NBSP (U+00A0) — bash collapses regular
-	# space runs to one space via word-splitting at IFS before eval, but
-	# NBSP isn't in IFS so it survives.
+	# Legend padding uses NBSP (U+00A0); bash collapses regular space
+	# runs to one space at IFS before eval, NBSP isn't in IFS.
 	local nbsp=$'\xc2\xa0'
 	local pad="${nbsp}${nbsp}"
-	# Stacked-band heights (each = 2 °C when its signal is 1)
-	RRD+=("CDEF:heater_h=heater,2,*")
-	RRD+=("CDEF:wet_h=wet_active,2,*")
-	RRD+=("CDEF:margin_h=margin_active,2,*")
-	RRD+=("AREA:heater_h#404040:'${pad}heater on'")
-	RRD+=("AREA:wet_h#226622:'${pad}wet trig':STACK")
-	RRD+=("AREA:margin_h#993333:'${pad}dew trig':STACK")
+	# Mutually-exclusive states (RPN: each evaluates to 0 or 1)
+	RRD+=("CDEF:hyst_hold=heater,wet_active,margin_active,+,0,EQ,*")
+	RRD+=("CDEF:wet_only=heater,wet_active,*,1,margin_active,-,*")
+	RRD+=("CDEF:dew_only=heater,margin_active,*,1,wet_active,-,*")
+	RRD+=("CDEF:both_trig=heater,wet_active,*,margin_active,*")
+	# TICK at canvas fractions — heights encode "how many triggers driving"
+	RRD+=("TICK:hyst_hold#606060:0.02:'${pad}hyst hold'")
+	RRD+=("TICK:wet_only#226622:0.04:'${pad}wet only'")
+	RRD+=("TICK:dew_only#993333:0.04:'${pad}dew only'")
+	RRD+=("TICK:both_trig#DD7700:0.06:'${pad}both trig'")
 	# Top-of-canvas "imaging dark" indicator (SQM >= 17.5)
 	RRD+=("CDEF:imaging_dark=sqm,17.5,GE")
 	RRD+=("TICK:imaging_dark#191970:-0.04:'${pad}imaging dark (SQM>=17.5)'")
