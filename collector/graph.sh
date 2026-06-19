@@ -779,6 +779,7 @@ cloudsensor() {
 	RRD+=("DEF:heater=cloud-sensor-heater.rrd:state:AVERAGE")
 	RRD+=("DEF:wet_active=cloud-sensor-heater-detail.rrd:wet_active:AVERAGE")
 	RRD+=("DEF:margin_active=cloud-sensor-heater-detail.rrd:margin_active:AVERAGE")
+	RRD+=("DEF:sqm=sqm.rrd:sqm:AVERAGE")
 	# Derived (match the C code's logic exactly)
 	RRD+=("CDEF:cap_t=baa_sensor,bcc_sensor,+,2,/")
 	RRD+=("CDEF:dt_baa=baa_sensor,baa_sky,-")
@@ -807,24 +808,33 @@ cloudsensor() {
 	RRD+=("VDEF:delta_tmax=delta_t,MAXIMUM")
 	RRD+=("VDEF:delta_tavg=delta_t,AVERAGE")
 	RRD+=("VDEF:delta_tmin=delta_t,MINIMUM")
-	# Heater output (black) + trigger-reason bands stacked above. TICK draws
-	# from y-axis-bottom up to fraction*canvas-height, so when multiple
-	# TICKs are active for the same sample they STACK visually — the band
-	# height encodes the trigger cause:
-	#   heater alone (hysteresis hold) → short  black band (0.00 - 0.02)
-	#   heater + wet                   → medium black+green (up to 0.06)
-	#   heater + wet + margin          → tall   black+green+pink (up to 0.10)
-	# So at a glance, taller = more triggers active.
+	# Bottom-of-canvas stacked status bands:
+	#   heater output (dark gray) + wet trigger (green) + margin trigger (red)
+	# Each contributes a 2 °C band when active, stacked additively (AREA :STACK)
+	# so the visible top of the stack genuinely shows "how many causes are
+	# driving the heater right now". heater alone (hysteresis hold) = 2 °C
+	# tall; heater + wet = 4; heater + wet + margin = 6.
 	#
-	# Legend swatch padding uses NBSP (U+00A0) instead of regular space:
-	# bash collapses runs of regular spaces to a single one via word-
-	# splitting at IFS before eval runs the rrdtool command. NBSP isn't
-	# in IFS, so it survives, and rrdtool renders it as visible whitespace.
+	# Top-of-canvas band:
+	#   imaging-dark (midnight blue) — drawn via TICK with negative fraction
+	#   when SQM ≥ 17.5 mag/arcsec² (the threshold from
+	#   query_sky_and_obsy_conditions.py without hysteresis).
+	#
+	# Legend swatch padding uses NBSP (U+00A0) — bash collapses regular
+	# space runs to one space via word-splitting at IFS before eval, but
+	# NBSP isn't in IFS so it survives.
 	local nbsp=$'\xc2\xa0'
 	local pad="${nbsp}${nbsp}"
-	RRD+=("TICK:heater#00000080:0.02:'${pad}heater on'")
-	RRD+=("TICK:wet_active#00880060:0.06:'${pad}wet trig'")
-	RRD+=("TICK:margin_active#FF666660:0.10:'${pad}dew trig'")
+	# Stacked-band heights (each = 2 °C when its signal is 1)
+	RRD+=("CDEF:heater_h=heater,2,*")
+	RRD+=("CDEF:wet_h=wet_active,2,*")
+	RRD+=("CDEF:margin_h=margin_active,2,*")
+	RRD+=("AREA:heater_h#404040:'${pad}heater on'")
+	RRD+=("AREA:wet_h#226622:'${pad}wet trig':STACK")
+	RRD+=("AREA:margin_h#993333:'${pad}dew trig':STACK")
+	# Top-of-canvas "imaging dark" indicator (SQM >= 17.5)
+	RRD+=("CDEF:imaging_dark=sqm,17.5,GE")
+	RRD+=("TICK:imaging_dark#191970:-0.04:'${pad}imaging dark (SQM>=17.5)'")
 	# Dewpoint-margin trigger curves (red-family, like cap_T which they affect)
 	RRD+=("LINE1:dew_plus_on#FF666680:'cap_T ON  (dewpoint+5K)'")
 	RRD+=("LINE1:dew_plus_off#FF666640:'cap_T OFF (dewpoint+7K)'")
