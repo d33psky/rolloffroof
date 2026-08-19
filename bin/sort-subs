@@ -1,0 +1,872 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["numpy", "scipy", "astropy", "matplotlib"]
+# ///
+"""sort-subs - set light frames aside that would make stacking fail or suffer.
+
+Typical case: the weather-safety system stops acquisition at dawn (or the
+sequence starts in dusk), and the frames around the cut-off show no stars.
+Astro Pixel Processor (APP) halts when it cannot find enough stars in a sub,
+so such frames must be moved out of the input set. This tool measures every
+frame, decides per frame, and (only with --apply) moves rejects aside.
+
+METRICS (per frame, cached in <object>/sub-metrics.csv next to the Light dir)
+  median      median pixel value of the frame = sky background level (ADU).
+  bg rate     median / exposure time (ADU/s), so 60 s and 300 s frames compare.
+  stars       number of detected stars: local maxima of the lightly smoothed
+              frame that rise more than 5 sigma above the background noise,
+              minus the points that lie on a trail (see trail).
+              This is a relative count - what matters is how a frame compares
+              with the other frames of the same night and filter, not the
+              absolute number. A bright (twilight) background raises the noise
+              and drowns the faint stars, so the count collapses exactly when
+              APP starts to struggle.
+  fwhm        median full width at half maximum of the brightest ~200 unsaturated
+              stars, in pixels. Larger = worse seeing / focus / tracking.
+              (For frames wider than 3200 px the detection runs on a 2x2
+              summed image; the FWHM is scaled back to original pixels.)
+  ecc         median star eccentricity, 0..1. 0 = perfectly round, 0.3-0.45 is
+              normal for this optics, 0.6 = visibly oval (wind, guiding),
+              > 0.7 = elongated/doubled stars (trailing, a mount step during
+              the exposure, autofocus mid-exposure).
+  trail       number of detections that lie on a straight line (satellite or
+              plane trail, found with a Hough-style collinearity search). Such
+              points are excluded from stars/fwhm/ecc, so a trail does not
+              disturb the other metrics. 0 = no trail.
+  focuspos, focustem, objctalt, airmass, ccd_temp are copied from the header.
+
+GROUPS
+  Frames are grouped by observing night (UTC date minus 12 h) and filter.
+  Each group gets two reference values that all relative rules use:
+    typical   = 85th percentile of the group's star counts  ("a good frame
+                of this night+filter has about this many stars")
+    baseline  = 15th percentile of the group's background rates ("the dark
+                part of this night+filter")
+  Percentiles instead of max/min so that a few outliers do not shift them.
+  A group smaller than --min-group frames gets no typical/baseline (statistics
+  over 3 frames are meaningless); only the absolute rules apply to it.
+
+DECISION (per frame; "x typical" = stars / typical, "x baseline" = bg rate / baseline)
+  REJECT if   stars < --star-frac x typical          stars gone (dawn, dusk, cloud)
+         or   stars < --min-stars                    absolute floor
+         or   stars > --max-star-frac x typical      star-count spike: every star
+                                                     doubled (mount step) or a
+                                                     defocused frame full of blobs
+                                                     (trails are excluded first)
+         or   ecc   > --max-ecc                      trailing / doubled stars
+         or   bg rate > --max-ratio x baseline       far too bright (backstop only;
+                                                     background also creeps up by
+                                                     ~2x every night simply because
+                                                     the target sinks, so this is
+                                                     not the primary rule)
+  BORDERLINE (reported, not moved - blink these by eye) if
+              stars < --border-star-frac x typical  or  bg rate > --border-ratio x baseline
+  KEEP otherwise.
+  --reject-border turns BORDERLINE into REJECT.
+  Optional extra rules (off unless given): --max-fwhm-frac, --max-ecc-frac,
+  --reject-trails.
+
+COMPARING WITH YOUR OWN SORTING
+  Frames already set aside - in <object>/Light_rejected/<Filter>/ (this tool)
+  or in hand-made Light/<Filter>/bad/ (or rejected/) dirs - are measured too
+  and shown as "aside". The report then counts disagreements:
+    S-rej/M-keep  script would reject a frame that is still in the main tree
+    S-keep/M-rej  script would keep a frame that was set aside
+  --show diff lists them with reasons, --write puts them in diff.tsv.
+
+MOVING (never deletes)
+  Nothing moves unless --apply is given. Rejects go to
+      <object>/Light_rejected/<Filter>/
+  With --apply --sync, frames the script would keep are also moved back home
+  from any aside location (that includes your hand-made bad/ dirs!).
+  Every move is recorded in a manifest; --undo MANIFEST reverses it.
+
+EXAMPLES
+  sort-subs ~/astro/data/NGC_6285/Light                 # measure + report (dry run)
+  sort-subs ~/astro/data/NGC_6285/Light --write --plot  # + verdict files + PNG per night
+  sort-subs ~/astro/data/NGC_6285/Light --show rejected
+  sort-subs ~/astro/data/NGC_6285/Light --explain 2026-08-15T05-33-37_..._2133.fits
+  sort-subs ~/astro/data/NGC_6285/Light --star-frac 0.4 --show border
+  sort-subs ~/astro/data/NGC_6285/Light --apply
+  sort-subs ~/astro/data/NGC_2841/Light --show diff     # compare with hand-sorted bad/
+  sort-subs ~/astro/data/NGC_2841/Light --star-frac 0.4 --apply --sync
+  sort-subs ~/astro/data/NGC_6285/Light --undo ~/astro/data/NGC_6285/Light_rejected/manifest-*.tsv
+"""
+
+import argparse
+import csv
+import os
+import shutil
+import sys
+from collections import defaultdict
+from datetime import datetime, timedelta
+
+import numpy as np
+from astropy.io import fits
+from scipy import ndimage
+
+METRIC_VERSION = 3          # bump when measure() changes -> cached rows are redone
+METRIC_FIELDS = [
+    'relpath', 'mtime', 'size', 'mver', 'date_obs', 'night', 'filter', 'exptime',
+    'objctalt', 'airmass', 'focuspos', 'focustem', 'ccd_temp',
+    'median', 'sigma', 'stars', 'fwhm', 'ecc', 'trail', 'sbin',
+]
+
+CACHE_NAME = 'sub-metrics.csv'
+
+
+# ----------------------------------------------------------------------------
+# metrics
+# ----------------------------------------------------------------------------
+
+def night_of(date_obs):
+    """Observing night: local-ish date after shifting back 12 h (DATE-OBS is UTC,
+    site is CE(S)T; 12 h works for any European longitude)."""
+    dt = datetime.fromisoformat(date_obs)
+    return (dt - timedelta(hours=12)).date().isoformat()
+
+
+def find_trails(xs, ys, shape, bin_px=8, min_pts=15, max_trails=3):
+    """Hough-style search for collinear detections (satellite / plane trails).
+    Returns a boolean mask of detections that lie on a trail. A trail is a
+    band of width ~bin_px that holds >= min_pts detections and at least 5x
+    the count a random band would hold."""
+    on_trail = np.zeros(len(xs), dtype=bool)
+    if len(xs) < min_pts:
+        return on_trail
+    thetas = np.deg2rad(np.arange(0, 180, 1.0))
+    sin, cos = np.sin(thetas), np.cos(thetas)
+    diag = float(np.hypot(*shape))
+    for _ in range(max_trails):
+        idx = np.nonzero(~on_trail)[0]
+        if len(idx) < min_pts:
+            break
+        x, y = xs[idx].astype(float), ys[idx].astype(float)
+        # perpendicular offset of every point for every angle: (n_theta, n_pts)
+        d = np.outer(-sin, x) + np.outer(cos, y)
+        b = np.floor((d + diag) / bin_px).astype(int)
+        best = (0, None, None)
+        for ti in range(len(thetas)):
+            counts = np.bincount(b[ti])
+            k = int(counts.argmax())
+            if counts[k] > best[0]:
+                best = (int(counts[k]), ti, k)
+        cnt, ti, k = best
+        expected = len(idx) * bin_px / diag
+        if cnt < max(min_pts, 5 * expected):
+            break
+        hit = np.abs(b[ti] - k) <= 1        # the peak bin and its neighbours
+        on_trail[idx[hit]] = True
+    return on_trail
+
+
+def star_metrics(data, nsigma=5.0, max_stars=200, box=4):
+    """Return (n_stars, median_fwhm_px, median_ecc, n_trail_points).
+
+    Stars = local maxima of the lightly smoothed image above med + nsigma*sigma,
+    minus detections that lie on a trail (see find_trails). FWHM/eccentricity
+    from intensity-weighted second moments of the brightest unsaturated
+    non-trail detections in a (2*box+1)^2 cutout. Crude but consistent, which
+    is what a relative selection needs.
+    """
+    med = float(np.median(data))
+    sig = float(np.median(np.abs(data - med))) * 1.4826
+    if sig <= 0:
+        sig = 1.0
+    sm = ndimage.gaussian_filter(data, 1.0)
+    thr = med + nsigma * sig
+    peaks = (sm == ndimage.maximum_filter(sm, size=5)) & (sm > thr)
+    # keep away from the edges so cutouts are always full
+    peaks[:box + 1, :] = peaks[-box - 1:, :] = False
+    peaks[:, :box + 1] = peaks[:, -box - 1:] = False
+    ys, xs = np.nonzero(peaks)
+    if len(ys) == 0:
+        return 0, float('nan'), float('nan'), 0
+
+    on_trail = find_trails(xs, ys, data.shape)
+    n_trail = int(on_trail.sum())
+    keep = np.nonzero(~on_trail)[0]
+    n = len(keep)
+    if n == 0:
+        return 0, float('nan'), float('nan'), n_trail
+
+    # brightest first, skip saturated cores
+    vals = sm[ys[keep], xs[keep]]
+    order = keep[np.argsort(vals)[::-1]]
+    sat = data.max() * 0.9
+    fwhms, eccs = [], []
+    yy, xx = np.mgrid[-box:box + 1, -box:box + 1]
+    for i in order:
+        y, x = ys[i], xs[i]
+        cut = data[y - box:y + box + 1, x - box:x + box + 1] - med
+        if cut.max() >= sat - med:
+            continue
+        cut = np.clip(cut, 0, None)
+        s = cut.sum()
+        if s <= 0:
+            continue
+        mx = (cut * xx).sum() / s
+        my = (cut * yy).sum() / s
+        sxx = (cut * (xx - mx) ** 2).sum() / s
+        syy = (cut * (yy - my) ** 2).sum() / s
+        sxy = (cut * (xx - mx) * (yy - my)).sum() / s
+        # principal axes
+        t = sxx + syy
+        d = np.sqrt(max((sxx - syy) ** 2 / 4 + sxy ** 2, 0))
+        l1, l2 = t / 2 + d, t / 2 - d
+        if l1 <= 0 or l2 <= 0:
+            continue
+        fwhms.append(2.3548 * np.sqrt((l1 + l2) / 2))
+        eccs.append(np.sqrt(1 - l2 / l1))
+        if len(fwhms) >= max_stars:
+            break
+    fwhm = float(np.median(fwhms)) if fwhms else float('nan')
+    ecc = float(np.median(eccs)) if eccs else float('nan')
+    return n, fwhm, ecc, n_trail
+
+
+def measure(path):
+    with fits.open(path, memmap=False) as hd:
+        h = hd[0].header
+        data = hd[0].data.astype(np.float32)
+    med = float(np.median(data))
+    sig = float(np.median(np.abs(data - med))) * 1.4826
+    # star detection on a 2x2-summed image for big (bin1) frames: ~4x faster and
+    # the metrics are only ever compared within one data set anyway
+    sbin = 2 if max(data.shape) > 3200 else 1
+    if sbin > 1:
+        hh, ww = (data.shape[0] // sbin) * sbin, (data.shape[1] // sbin) * sbin
+        sdata = data[:hh, :ww].reshape(hh // sbin, sbin, ww // sbin, sbin).sum(axis=(1, 3))
+    else:
+        sdata = data
+    n, fwhm, ecc, n_trail = star_metrics(sdata)
+    fwhm *= sbin
+    date_obs = h['DATE-OBS']
+    return {
+        'date_obs': date_obs,
+        'night': night_of(date_obs),
+        'filter': h.get('FILTER', 'NA'),
+        'exptime': h.get('EXPTIME', ''),
+        'objctalt': h.get('OBJCTALT', ''),
+        'airmass': h.get('AIRMASS', ''),
+        'focuspos': h.get('FOCUSPOS', ''),
+        'focustem': h.get('FOCUSTEM', ''),
+        'ccd_temp': h.get('CCD-TEMP', ''),
+        'median': round(med, 1),
+        'sigma': round(sig, 2),
+        'stars': n,
+        'fwhm': round(fwhm, 2),
+        'ecc': round(ecc, 3),
+        'trail': n_trail,
+        'sbin': sbin,
+    }
+
+
+def load_cache(path):
+    cache = {}
+    if os.path.exists(path):
+        with open(path, newline='') as fh:
+            for row in csv.DictReader(fh):
+                cache[row['relpath']] = row
+    return cache
+
+
+def save_cache(path, rows):
+    tmp = path + '.tmp'
+    with open(tmp, 'w', newline='') as fh:
+        w = csv.DictWriter(fh, fieldnames=METRIC_FIELDS, extrasaction='ignore')
+        w.writeheader()
+        for r in sorted(rows.values(), key=lambda r: r['date_obs']):
+            w.writerow(r)
+    os.replace(tmp, path)
+
+
+ASIDE_DIRS = ('bad', 'rejected')
+
+
+def scan_tree(light_dir, parent):
+    """Yield (abs_path, relpath-to-parent, location, home_relpath) for every FITS
+    in the main tree, in in-tree <Filter>/{bad,rejected}/ dirs, and in the
+    sibling <Light>_rejected/ tree. home_relpath is where the frame belongs when
+    kept: <Light>/<Filter>/<name>."""
+    light_name = os.path.basename(light_dir)
+    rej_root = os.path.join(parent, light_name + '_rejected')
+    for top in (light_dir, rej_root):
+        if not os.path.isdir(top):
+            continue
+        for root, dirs, names in os.walk(top):
+            depth = os.path.relpath(root, top).count(os.sep) + (root != top)
+            if depth >= 2:          # top/<Filter>/<bad|rejected> is as deep as we go
+                dirs[:] = []
+            else:
+                dirs.sort()
+            for n in sorted(names):
+                if not n.lower().endswith(('.fits', '.fit', '.fts')):
+                    continue
+                f = os.path.join(root, n)
+                rel = os.path.relpath(f, parent)
+                parts = rel.split(os.sep)            # [Light, Filter, (bad,) name]
+                aside = top == rej_root or any(x.lower() in ASIDE_DIRS for x in parts[1:-1])
+                filt_dir = [x for x in parts[1:-1] if x.lower() not in ASIDE_DIRS]
+                home = os.path.join(light_name, *filt_dir, n)
+                yield f, rel, ('aside' if aside else 'main'), home
+
+
+def collect(light_dir, parent, cache_path, recompute=False):
+    """Return {relpath: metrics} for all frames (main + aside locations)."""
+    cache = {} if recompute else load_cache(cache_path)
+    # moved frames (apply/sync/manual) keep their metrics: fall back to basename+mtime+size
+    by_ident = {(os.path.basename(c['relpath']), int(float(c['mtime'])), int(c['size'])): c
+                for c in cache.values()}
+    found = list(scan_tree(light_dir, parent))
+    rows = {}
+    todo = []
+    for f, rel, loc, home in found:
+        st = os.stat(f)
+        c = cache.get(rel) or by_ident.get((os.path.basename(f), int(st.st_mtime), st.st_size))
+        if (c and int(float(c['mtime'])) == int(st.st_mtime) and int(c['size']) == st.st_size
+                and c.get('mver') == str(METRIC_VERSION)):
+            c = dict(c, relpath=rel)
+            rows[rel] = c
+        else:
+            todo.append((f, rel, st))
+    if todo:
+        print(f'measuring {len(todo)} frames ({len(rows)} cached) ...', file=sys.stderr)
+        for i, (f, rel, st) in enumerate(todo, 1):
+            m = measure(f)
+            m.update(relpath=rel, mtime=int(st.st_mtime), size=st.st_size, mver=METRIC_VERSION)
+            rows[rel] = m
+            if i % 50 == 0 or i == len(todo):
+                print(f'  {i}/{len(todo)}', file=sys.stderr)
+                save_cache(cache_path, rows)
+        save_cache(cache_path, rows)
+    # location/home derive from the current path and are never cached
+    for f, rel, loc, home in found:
+        rows[rel].update(location=loc, home=home)
+    return rows
+
+
+# ----------------------------------------------------------------------------
+# decision
+# ----------------------------------------------------------------------------
+
+def mark_after_focus(rows):
+    """Per night (all filters, time order): r['after_focus'] = 1 for the first
+    frame after FOCUSPOS changed, 2 for the next one, ... 0 otherwise."""
+    nights = defaultdict(list)
+    for r in rows.values():
+        nights[r['night']].append(r)
+    for g in nights.values():
+        g.sort(key=lambda r: r['date_obs'])
+        prev = None
+        since = 0
+        for r in g:
+            pos = r.get('focuspos', '')
+            if prev is not None and pos not in ('', None) and pos != prev:
+                since = 1
+            elif since:
+                since += 1
+            r['after_focus'] = since
+            if pos not in ('', None):
+                prev = pos
+
+
+def classify(rows, star_frac, border_star_frac, max_star_frac, max_ecc, k, border_k, pct,
+             min_stars, min_group, max_fwhm_frac=None, max_ecc_frac=None,
+             reject_border=False, reject_trails=None):
+    """Annotate each row with typical/baseline, verdict ('keep'|'border'|'reject')
+    and reason. Returns groups {(night, filter): [rows sorted by time]}."""
+    mark_after_focus(rows)
+    groups = defaultdict(list)
+    for r in rows.values():
+        groups[(r['night'], r['filter'])].append(r)
+    for key, g in groups.items():
+        g.sort(key=lambda r: r['date_obs'])
+        fw_all = [fnum(r['fwhm']) for r in g]
+        ec_all = [fnum(r['ecc']) for r in g]
+        fw_med = float(np.nanmedian(fw_all)) if len(g) >= min_group and not all(np.isnan(fw_all)) else float('nan')
+        ec_med = float(np.nanmedian(ec_all)) if len(g) >= min_group and not all(np.isnan(ec_all)) else float('nan')
+        rates = np.array([float(r['median']) / max(fnum(r['exptime']), 1e-6) for r in g])
+        stars_arr = np.array([int(r['stars']) for r in g])
+        if len(g) >= min_group:
+            baseline = float(np.percentile(rates, pct))
+            typical = float(np.percentile(stars_arr, 85))
+        else:
+            baseline = typical = float('nan')
+        for r, rate, stars in zip(g, rates, stars_arr):
+            ratio = rate / baseline if baseline > 0 else float('nan')
+            sfrac = stars / typical if typical > 0 else float('nan')
+            r['baseline'] = baseline
+            r['typical'] = typical
+            r['ratio'] = ratio
+            r['sfrac'] = sfrac
+            reasons = []
+            if stars < min_stars:
+                reasons.append(f'stars={stars}<{min_stars}')
+            if not np.isnan(sfrac) and sfrac < star_frac:
+                reasons.append(f'stars={stars}={sfrac:.2f}x<{star_frac}')
+            if not np.isnan(sfrac) and sfrac > max_star_frac:
+                reasons.append(f'stars={stars}={sfrac:.2f}x>{max_star_frac} (doubled stars / defocus?)')
+            trail = int(fnum(r.get('trail')) or 0)
+            if reject_trails is not None and trail >= reject_trails:
+                reasons.append(f'trail={trail}>={reject_trails} (satellite/plane)')
+            if not np.isnan(ratio) and ratio > k:
+                reasons.append(f'bg x{ratio:.2f}>{k}')
+            ecc = fnum(r['ecc'])
+            if not np.isnan(ecc) and ecc > max_ecc:
+                reasons.append(f'ecc={ecc:.2f}>{max_ecc} (trailing/double)')
+            if max_ecc_frac and not np.isnan(ecc) and not np.isnan(ec_med) and ecc > max_ecc_frac * ec_med:
+                reasons.append(f'ecc={ecc:.2f}={ecc / ec_med:.2f}x>{max_ecc_frac}')
+            fwhm = fnum(r['fwhm'])
+            if max_fwhm_frac and not np.isnan(fwhm) and not np.isnan(fw_med) and fwhm > max_fwhm_frac * fw_med:
+                reasons.append(f'fwhm={fwhm:.2f}={fwhm / fw_med:.2f}x>{max_fwhm_frac}')
+            r['fwhm_med'] = fw_med
+            r['ecc_med'] = ec_med
+            if reasons:
+                r['verdict'] = 'reject'
+            else:
+                if not np.isnan(sfrac) and sfrac < border_star_frac:
+                    reasons.append(f'stars={stars}={sfrac:.2f}x')
+                if not np.isnan(ratio) and ratio > border_k:
+                    reasons.append(f'bg x{ratio:.2f}')
+                r['verdict'] = 'border' if reasons else 'keep'
+                if reasons and reject_border:
+                    r['verdict'] = 'reject'
+                    reasons.append('(border->reject)')
+            r['reason'] = ' '.join(reasons)
+    return groups
+
+
+def fnum(v):
+    """float() that maps '', None and 'nan' (cached CSV strings) to nan."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return float('nan')
+
+
+def hm(hours):
+    """30.26 h -> '30h16m' (no decimal hours: too easy to read as h:mm)."""
+    m = int(round(hours * 60))
+    return f'{m // 60}h{m % 60:02d}m'
+
+
+def fmt_row(r):
+    alt = f"{float(r['objctalt']):5.1f}" if r['objctalt'] not in ('', None) else '  n/a'
+    ratio = f"{r['ratio']:5.2f}" if not np.isnan(r['ratio']) else '  n/a'
+    return (f"{r['date_obs'][:19]} {r['filter']:<5} alt={alt} med={float(r['median']):8.1f} "
+            f"x{ratio} stars={int(r['stars']):4d} ({fnum(r.get('sfrac')):.2f}x) fwhm={r['fwhm']:>5} ecc={r['ecc']:>5} "
+            f"trail={int(fnum(r.get('trail')) or 0):3d} "
+            f"{r['reason']}  {r['relpath']}"
+            + (f"  [{r['location'].upper()} {disagreement(r)}]" if r['location'] == 'aside' or disagreement(r) else ''))
+
+
+def report(groups, show):
+    tot = defaultdict(float)
+    any_aside = any(r['location'] == 'aside' for g in groups.values() for r in g)
+    print(f"{'night':<10} {'filt':<5} {'n':>4} {'keep':>4} {'bord':>4} {'rej':>4} "
+          f"{'bg/s':>7} {'stars':>5} {'kept':>7}  {'fwhm(keep)':>10}"
+          + (f"  {'aside':>5} {'S-rej/M-keep':>12} {'S-keep/M-rej':>12}" if any_aside else ''))
+    for (night, filt) in sorted(groups):
+        g = groups[(night, filt)]
+        keep = [r for r in g if r['verdict'] == 'keep']
+        bord = [r for r in g if r['verdict'] == 'border']
+        rej = [r for r in g if r['verdict'] == 'reject']
+        keep_h = sum(float(r['exptime'] or 0) for r in keep) / 3600
+        fw = [f for f in (fnum(r['fwhm']) for r in keep) if not np.isnan(f)]
+        fwtxt = f"{np.median(fw):.2f}" if fw else 'n/a'
+        base, typ = g[0]['baseline'], g[0]['typical']
+        basetxt = f"{base:7.1f}" if not np.isnan(base) else '    n/a'
+        typtxt = f"{typ:5.0f}" if not np.isnan(typ) else '  n/a'
+        line = (f"{night:<10} {filt:<5} {len(g):>4} {len(keep):>4} {len(bord):>4} {len(rej):>4} "
+                f"{basetxt} {typtxt} {hm(keep_h):>7}  {fwtxt:>10}")
+        if any_aside:
+            aside = [r for r in g if r['location'] == 'aside']
+            srej_mkeep = [r for r in g if r['verdict'] == 'reject' and r['location'] == 'main']
+            skeep_mrej = [r for r in g if r['verdict'] != 'reject' and r['location'] == 'aside']
+            line += f"  {len(aside):>5} {len(srej_mkeep):>12} {len(skeep_mrej):>12}"
+            tot['_srej_mkeep'] += len(srej_mkeep)
+            tot['_skeep_mrej'] += len(skeep_mrej)
+            tot['_aside'] += len(aside)
+        print(line)
+        tot[filt] += keep_h
+        tot['_rej'] += len(rej)
+        tot['_bord'] += len(bord)
+    print()
+    print('kept integration per filter: ' +
+          ', '.join(f"{f}={hm(h)}" for f, h in sorted(tot.items()) if not f.startswith('_')))
+    print(f"rejected: {int(tot['_rej'])}   borderline (blink these): {int(tot['_bord'])}")
+    if any_aside:
+        print(f"manually set aside: {int(tot['_aside'])}   "
+              f"script rejects but manually kept (S-rej/M-keep): {int(tot['_srej_mkeep'])}   "
+              f"script keeps but manually rejected (S-keep/M-rej): {int(tot['_skeep_mrej'])}")
+
+    if show:
+        print()
+        for key in sorted(groups):
+            for r in groups[key]:
+                if is_shown(r, show):
+                    print(fmt_row(r))
+
+
+def disagreement(r):
+    """'S-rej/M-keep', 'S-keep/M-rej' or '' for a frame."""
+    if r['verdict'] == 'reject' and r['location'] == 'main':
+        return 'S-rej/M-keep'
+    if r['verdict'] != 'reject' and r['location'] == 'aside':
+        return 'S-keep/M-rej'
+    return ''
+
+
+def is_shown(r, show):
+    return {'rejected': r['verdict'] == 'reject',
+            'border': r['verdict'] == 'border',
+            'all': True,
+            'diff': bool(disagreement(r))}[show]
+
+
+def write_verdicts(groups, out_dir):
+    """all.tsv: one line per frame with metrics + verdict + reason (sorted by
+    time); rejected.txt / border.txt / keep.txt: bare relative paths per class,
+    for pasting into a blink tool. Also blink.tsv: rejected+border with reasons."""
+    os.makedirs(out_dir, exist_ok=True)
+    allrows = sorted((r for g in groups.values() for r in g), key=lambda r: r['date_obs'])
+    cols = ['verdict', 'location', 'reason', 'date_obs', 'night', 'filter', 'exptime', 'objctalt',
+            'median', 'ratio', 'stars', 'sfrac', 'fwhm', 'ecc', 'trail', 'focuspos', 'after_focus',
+            'focustem', 'relpath']
+    with open(os.path.join(out_dir, 'all.tsv'), 'w') as fh:
+        fh.write('\t'.join(cols) + '\n')
+        for r in allrows:
+            vals = []
+            for c in cols:
+                v = r.get(c, '')
+                if isinstance(v, float):
+                    v = f'{v:.3f}'
+                vals.append(str(v))
+            fh.write('\t'.join(vals) + '\n')
+    for cls in ('reject', 'border', 'keep'):
+        name = {'reject': 'rejected', 'border': 'border', 'keep': 'keep'}[cls]
+        with open(os.path.join(out_dir, name + '.txt'), 'w') as fh:
+            for r in allrows:
+                if r['verdict'] == cls:
+                    fh.write(r['relpath'] + '\n')
+    with open(os.path.join(out_dir, 'blink.tsv'), 'w') as fh:
+        fh.write('verdict\treason\tstars\tratio\trelpath\n')
+        for r in allrows:
+            if r['verdict'] in ('reject', 'border'):
+                fh.write(f"{r['verdict']}\t{r['reason']}\t{r['stars']}\t{r['ratio']:.2f}\t{r['relpath']}\n")
+    with open(os.path.join(out_dir, 'diff.tsv'), 'w') as fh:
+        fh.write('disagreement\tverdict\treason\tstars\tratio\tfwhm\tecc\trelpath\n')
+        for r in allrows:
+            d = disagreement(r)
+            if d:
+                fh.write(f"{d}\t{r['verdict']}\t{r['reason']}\t{r['stars']}\t{r['ratio']:.2f}\t"
+                         f"{r['fwhm']}\t{r['ecc']}\t{r['relpath']}\n")
+    print(f'verdicts written to {out_dir}/ (all.tsv, blink.tsv, diff.tsv, rejected.txt, border.txt, keep.txt)')
+
+
+def explain(groups, light_dir, files):
+    """Print verdict + metrics for the given files (any path form or basename)."""
+    by_base = {}
+    for g in groups.values():
+        for r in g:
+            by_base[os.path.basename(r['relpath'])] = r
+    for f in files:
+        r = by_base.get(os.path.basename(f))
+        if r is None:
+            print(f'{f}: not in metrics (outside {light_dir}?)')
+            continue
+        print(f"{r['verdict'].upper():7} {fmt_row(r)}")
+        typ = r['typical']
+        base = r['baseline']
+        print(f"        group {r['night']}/{r['filter']}: typical stars={typ:.0f}, "
+              f"baseline bg={base:.2f} ADU/s (x{fnum(r['exptime']):g}s = {base * fnum(r['exptime']):.0f} ADU)"
+              if not np.isnan(typ) else
+              f"        group {r['night']}/{r['filter']}: too small for relative rules")
+
+
+# ----------------------------------------------------------------------------
+# plots
+# ----------------------------------------------------------------------------
+
+FILTER_COLORS = {'Lum': 'gray', 'Red': 'red', 'Green': 'green', 'Blue': 'blue',
+                 'Ha': 'crimson', 'OIII': 'teal', 'SII': 'darkorange'}
+VERDICT_MARK = {'keep': ('o', 'none'), 'border': ('s', 'gold'), 'reject': ('x', 'black')}
+
+
+def plot_nights(groups, out_dir):
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    import matplotlib.ticker as ticker
+
+    os.makedirs(out_dir, exist_ok=True)
+    nights = sorted({n for (n, _) in groups})
+    for night in nights:
+        fig, axes = plt.subplots(4, 1, figsize=(12, 11), sharex=True)
+        ax_bg, ax_st, ax_fw, ax_ec = axes
+        for (n, filt), g in sorted(groups.items()):
+            if n != night:
+                continue
+            col = FILTER_COLORS.get(filt, None)
+            t = [datetime.fromisoformat(r['date_obs']) for r in g]
+            med = [float(r['median']) for r in g]
+            stars = [int(r['stars']) for r in g]
+            fw = [fnum(r['fwhm']) for r in g]
+            ec = [fnum(r['ecc']) for r in g]
+            ax_bg.plot(t, med, '-', color=col, lw=0.8, alpha=0.6, label=filt)
+            ax_st.plot(t, stars, '-', color=col, lw=0.8, alpha=0.6)
+            ax_fw.plot(t, fw, '-', color=col, lw=0.8, alpha=0.6)
+            ax_ec.plot(t, ec, '-', color=col, lw=0.8, alpha=0.6)
+            for v, (mk, face) in VERDICT_MARK.items():
+                idx = [i for i, r in enumerate(g) if r['verdict'] == v]
+                if not idx:
+                    continue
+                kw = dict(marker=mk, ls='none', ms=5, color=col)
+                if mk != 'x':
+                    kw['mfc'] = face
+                ax_bg.plot([t[i] for i in idx], [med[i] for i in idx], **kw)
+                ax_st.plot([t[i] for i in idx], [stars[i] for i in idx], **kw)
+                ax_fw.plot([t[i] for i in idx], [fw[i] for i in idx], **kw)
+                ax_ec.plot([t[i] for i in idx], [ec[i] for i in idx], **kw)
+            tidx = [i for i, r in enumerate(g) if (fnum(r.get('trail')) or 0) > 0]
+            if tidx:
+                ax_st.plot([t[i] for i in tidx], [stars[i] for i in tidx], marker='|', ls='none',
+                           ms=12, color='magenta', mew=1.5, label='trail in frame')
+            idx = [i for i, r in enumerate(g) if r['location'] == 'aside']
+            if idx:
+                ax_st.plot([t[i] for i in idx], [stars[i] for i in idx], marker='+', ls='none',
+                           ms=9, color='black', mew=1.2, label='set aside (manual/previous run)')
+            base = g[0]['baseline']
+            if not np.isnan(base):
+                exp = np.median([fnum(r['exptime']) for r in g])
+                ax_bg.axhline(base * exp, color=col, ls=':', lw=0.8)
+            typ = g[0]['typical']
+            if not np.isnan(typ):
+                ax_st.axhline(typ, color=col, ls=':', lw=0.8)
+        ax_bg.set_yscale('log')
+        plain = ticker.FuncFormatter(lambda v, _: f'{v:g}')
+        ax_bg.yaxis.set_major_formatter(plain)
+        ax_bg.yaxis.set_minor_formatter(plain)
+        ax_bg.tick_params(axis='y', which='minor', labelsize=7)
+        ax_bg.set_ylabel('median background (ADU)')
+        ax_bg.legend(loc='upper left', fontsize=8, ncol=5)
+        ax_bg.set_title(f'{night}   (o keep, square border, x reject; dotted = group baseline / typical)')
+        ax_st.set_ylabel('stars')
+        ax_st.set_ylim(bottom=0)
+        h, l = ax_st.get_legend_handles_labels()
+        if h:
+            uniq = dict(zip(l, h))
+            ax_st.legend(uniq.values(), uniq.keys(), loc='lower left', fontsize=8)
+        ax_fw.set_ylabel('FWHM (px)')
+        ax_ec.set_ylabel('eccentricity')
+        ax_ec.set_ylim(0, 1)
+        ax_ec.set_xlabel('UTC')
+        ax_ec.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+        for ax in axes:
+            ax.grid(alpha=0.3)
+        fig.tight_layout()
+        out = os.path.join(out_dir, f'{night}.png')
+        fig.savefig(out, dpi=100)
+        plt.close(fig)
+        print(f'plot: {out}')
+
+
+# ----------------------------------------------------------------------------
+# move / undo
+# ----------------------------------------------------------------------------
+
+def apply_moves(parent, light_dir, groups, dest_root, sync):
+    """Move script-rejects that are still in the main tree to dest_root/<Filter>/.
+    With sync=True also move non-rejects found in any aside location back to
+    their home in the main tree (this includes hand-made bad/ dirs)."""
+    ts = datetime.now().strftime('%Y%m%dT%H%M%S')
+    os.makedirs(dest_root, exist_ok=True)
+    manifest = os.path.join(dest_root, f'manifest-{ts}.tsv')
+    light_name = os.path.basename(light_dir)
+    out = back = 0
+    with open(manifest, 'w') as mf:
+        mf.write('src\tdst\treason\n')
+        for key in sorted(groups):
+            for r in groups[key]:
+                d = disagreement(r)
+                if d == 'S-rej/M-keep':
+                    src = os.path.join(parent, r['relpath'])
+                    # Light/<F>/name -> Light_rejected/<F>/name
+                    dst = os.path.join(dest_root, os.path.relpath(r['home'], light_name))
+                    reason = r['reason']
+                elif d == 'S-keep/M-rej' and sync:
+                    src = os.path.join(parent, r['relpath'])
+                    dst = os.path.join(parent, r['home'])
+                    reason = 'back: ' + (r['reason'] or 'keep')
+                else:
+                    continue
+                if os.path.exists(dst):
+                    print(f'SKIP exists: {dst}', file=sys.stderr)
+                    continue
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.move(src, dst)
+                mf.write(f'{src}\t{dst}\t{reason}\n')
+                if d == 'S-rej/M-keep':
+                    out += 1
+                else:
+                    back += 1
+    print(f'moved {out} files to {dest_root}, {back} files back home; manifest: {manifest}')
+
+
+def undo(manifest):
+    n = 0
+    with open(manifest) as fh:
+        next(fh)
+        for line in fh:
+            src, dst, _ = line.rstrip('\n').split('\t', 2)
+            if not os.path.exists(dst):
+                print(f'SKIP missing: {dst}', file=sys.stderr)
+                continue
+            os.makedirs(os.path.dirname(src), exist_ok=True)
+            shutil.move(dst, src)
+            n += 1
+    print(f'restored {n} files')
+
+
+# ----------------------------------------------------------------------------
+
+def main():
+    class Fmt(argparse.RawDescriptionHelpFormatter):
+        """show (default: X) for valued options, (default: off) for the optional
+        rules, nothing for plain switches"""
+        def _get_help_string(self, action):
+            h = action.help
+            if action.default is argparse.SUPPRESS or isinstance(action, argparse._StoreTrueAction):
+                return h
+            if action.option_strings and action.type in (int, float):
+                return h + (' (default: off)' if action.default is None else f' (default: {action.default})')
+            return h
+
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=Fmt)
+    ap.add_argument('light_dir', nargs='?', default='.',
+                    help='Light directory containing <Filter>/ subdirs with FITS files, or the '
+                         'object directory that contains Light/ (default: current directory)')
+
+    g = ap.add_argument_group('decision rules (all relative to the night+filter group, see above)')
+    g.add_argument('--star-frac', type=float, default=0.3, metavar='F',
+                   help='REJECT when stars < F x typical. 0.3 = a frame with less than 30%% '
+                        'of the star count of a good frame of that night+filter')
+    g.add_argument('--border-star-frac', type=float, default=0.5, metavar='F',
+                   help='BORDERLINE when stars < F x typical (but >= --star-frac x typical)')
+    g.add_argument('--max-star-frac', type=float, default=1.3, metavar='F',
+                   help='REJECT when stars > F x typical: a star-count spike means every star '
+                        'is doubled (mount step during the exposure) or the frame is badly '
+                        'defocused')
+    g.add_argument('--max-ecc', type=float, default=0.7, metavar='E',
+                   help='REJECT when median star eccentricity > E (0 = round, 1 = a line; '
+                        'normal frames sit around 0.3-0.45, > 0.7 is trailed/doubled)')
+    g.add_argument('-k', '--max-ratio', type=float, default=4.0, metavar='K',
+                   help='REJECT when background rate > K x baseline (far too bright; backstop '
+                        'behind the star rules)')
+    g.add_argument('--border-ratio', type=float, default=3.0, metavar='K',
+                   help='BORDERLINE when background rate > K x baseline')
+    g.add_argument('--min-stars', type=int, default=20, metavar='N',
+                   help='REJECT when fewer than N stars are detected, regardless of the group '
+                        '(absolute floor; the only rule that applies to tiny groups)')
+    g.add_argument('--reject-border', action='store_true',
+                   help='treat BORDERLINE frames as REJECT (stricter selection)')
+
+    g = ap.add_argument_group('optional extra rules (off unless given)')
+    g.add_argument('--max-fwhm-frac', type=float, default=None, metavar='F',
+                   help='REJECT when FWHM > F x the group median FWHM (e.g. 1.2 = 20%% '
+                        'fatter stars than the night\'s norm: focus drift, wind, seeing)')
+    g.add_argument('--max-ecc-frac', type=float, default=None, metavar='F',
+                   help='REJECT when eccentricity > F x the group median eccentricity '
+                        '(e.g. 1.6; catches mild trailing that stays under --max-ecc)')
+
+    g.add_argument('--reject-trails', type=int, default=None, metavar='N',
+                   help='REJECT frames with a satellite/plane trail of at least N detection '
+                        'points (trails are otherwise ignored: their points are excluded from '
+                        'the star count and APP\'s sigma clipping removes them; try 15)')
+
+    g = ap.add_argument_group('group statistics')
+    g.add_argument('--percentile', type=float, default=15, metavar='P',
+                   help='baseline = P-th percentile of the group\'s background rates')
+    g.add_argument('--min-group', type=int, default=8, metavar='N',
+                   help='a night+filter group with fewer than N frames gets no typical/baseline; '
+                        'only --min-stars applies to it')
+
+    g = ap.add_argument_group('output (no files are moved)')
+    g.add_argument('--show', choices=['rejected', 'border', 'diff', 'all'],
+                   help='list frames of this class with metrics and reason; diff = frames where '
+                        'the script disagrees with where the frame currently is')
+    g.add_argument('--explain', nargs='+', metavar='FILE',
+                   help='print verdict, reason, metrics and group references for these frames '
+                        '(basename is enough)')
+    g.add_argument('--write', action='store_true',
+                   help='write <object>/sub-metrics-verdicts/: all.tsv (every frame), blink.tsv '
+                        '(rejected+borderline with reasons), diff.tsv, and bare file lists '
+                        'rejected.txt / border.txt / keep.txt')
+    g.add_argument('--plot', action='store_true',
+                   help='write one PNG per night to <object>/sub-metrics-plots/ (background, '
+                        'stars, FWHM, eccentricity vs time; o keep, square borderline, x reject, '
+                        '+ set aside, | trail)')
+    g.add_argument('--recompute', action='store_true',
+                   help='ignore the metrics cache and measure every frame again')
+
+    g = ap.add_argument_group('actions (these move files)')
+    g.add_argument('--apply', action='store_true',
+                   help='move REJECT frames out of the main tree into <object>/Light_rejected/<Filter>/ '
+                        'and write a manifest')
+    g.add_argument('--sync', action='store_true',
+                   help='with --apply: also move frames the script would KEEP from any aside '
+                        'location (Light_rejected/, <Filter>/bad/, <Filter>/rejected/) back home')
+    g.add_argument('--any-dir', action='store_true',
+                   help='allow a light dir that is not called Light/ (layout must still be '
+                        '<dir>/<Filter>/*.fits)')
+    g.add_argument('--dest', metavar='DIR',
+                   help='destination root instead of <object>/Light_rejected')
+    g.add_argument('--undo', metavar='MANIFEST',
+                   help='move the files listed in MANIFEST back where they came from, then exit')
+    a = ap.parse_args()
+
+    if a.undo:
+        undo(a.undo)
+        return
+
+    light_dir = os.path.abspath(a.light_dir)
+    if not os.path.isdir(light_dir):
+        sys.exit(f'not a directory: {light_dir}')
+    # accept the object dir (the one that holds Light/) as well
+    if os.path.basename(light_dir).lower() != 'light' and os.path.isdir(os.path.join(light_dir, 'Light')):
+        light_dir = os.path.join(light_dir, 'Light')
+    if os.path.basename(light_dir).lower() != 'light' and not a.any_dir:
+        sys.exit(f'{light_dir} is not a Light/ directory and contains no Light/ subdirectory.\n'
+                 f'Point me at <object>/Light (or <object>/), or pass --any-dir if your layout really '
+                 f'is <dir>/<Filter>/*.fits (outputs then go next to <dir>).')
+    print(f'light dir: {light_dir}', file=sys.stderr)
+    parent = os.path.dirname(light_dir)
+    cache_path = os.path.join(parent, CACHE_NAME)
+    dest_root = a.dest or os.path.join(parent, os.path.basename(light_dir) + '_rejected')
+
+    rows = collect(light_dir, parent, cache_path, a.recompute)
+    if not rows:
+        sys.exit('no FITS files found')
+    groups = classify(rows, a.star_frac, a.border_star_frac, a.max_star_frac, a.max_ecc,
+                      a.max_ratio, a.border_ratio, a.percentile, a.min_stars, a.min_group,
+                      a.max_fwhm_frac, a.max_ecc_frac, a.reject_border, a.reject_trails)
+    if a.explain:
+        explain(groups, light_dir, a.explain)
+        return
+    report(groups, a.show)
+    if a.write:
+        write_verdicts(groups, os.path.join(parent, 'sub-metrics-verdicts'))
+    if a.plot:
+        plot_nights(groups, os.path.join(parent, 'sub-metrics-plots'))
+    if a.apply:
+        apply_moves(parent, light_dir, groups, dest_root, a.sync)
+    else:
+        print('\n(dry run - use --apply to move rejected frames, --apply --sync to also move '
+              'frames back that the script would keep)')
+
+
+if __name__ == '__main__':
+    main()
