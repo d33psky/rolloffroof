@@ -1,0 +1,573 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["numpy", "scipy", "astropy", "matplotlib"]
+# ///
+"""synth-flat - crop stacked channels to their common area, remove the additive
+gradient and divide out a synthetic flat, per channel.
+
+This automates the PixInsight routine
+  DynamicCrop (common area of all channels)
+  -> ABE subtract 1st order            (additive: moon / light pollution gradient)
+  -> ABE divide high order / StarNet + clone stamp + MMT last layer
+                                       (multiplicative: vignetting, flat rings)
+  -> PixelMath clean = old * mean(flat) / flat
+without StarNet: stars and large objects (galaxies) are MASKED instead of
+removed, and the background model is built from the unmasked pixels only.
+
+PIPELINE
+  1. valid mask per channel: pixels > 0 and finite (APP leaves a zero border
+     after registration).
+  2. --crop: largest rectangle that is valid in ALL channels; every channel is
+     cropped to it (same size, still aligned). CRPIX1/2 are shifted.
+     Narrow bright/dark bands at the edges (the outer dither margin of the
+     stack, built from far fewer subs) are detected on the corrected result
+     and trimmed automatically (--edge-trim).
+  3. per channel:
+     a. source mask: pixels above background + --mask-sigma x noise, dilated;
+        big connected components (galaxies, bright star haloes) get a wider
+        dilation scaled with their size; --mask-region adds hand-drawn circles.
+     b. additive gradient: polynomial of order --grad-order fitted to the
+        unmasked background (iterated sigma clipping), subtracted with its
+        mean put back (the overall level stays).
+     c. multiplicative flat: median of the unmasked pixels per mesh cell
+        (--mesh px, default derived from the image size), holes filled,
+        bicubic spline, light smoothing. With --radial a radial profile around
+        the image centre is multiplied in (concentric flat rings).
+        flat := model / mean(model over valid)
+     d. clean = (image - gradient) / flat
+  4. --write: <name>-clean.fits and <name>-synthflat.fits (and -crop.fits with
+     --keep-crop) next to the input, float32, original header carried over
+     plus HISTORY lines. Inputs are never overwritten.
+  5. --plot: <name>-synthflat.png diagnostics (before / mask / gradient / flat /
+     after on the same stretch / remaining large-scale background).
+
+"Scale" of the flat: --mesh is the cell size in pixels; structures smaller
+than ~2 cells are not followed (they stay in the image), everything larger is
+taken to be flat-field/background. The default is min(width, height) / 24,
+which on a 4337x2980 stack is ~65 px - fine enough to follow flat-field
+interference rings. PixInsight MMT "8 layers, last one only" corresponds to
+~256 px; use --mesh 256 for that, at the price of leaving the rings in.
+NOTE: everything the model follows is treated as background - real extended
+nebulosity (IFN, cirrus) at scales above ~2 mesh cells will be flattened too.
+
+EXAMPLES
+  synth-flat ~/astro/data/NGC_6285/t1                    # all channels in the dir, report only
+  synth-flat ~/astro/data/NGC_6285/t1 --crop --plot      # + diagnostics PNGs
+  synth-flat ~/astro/data/NGC_6285/t1 --crop --radial --write
+  synth-flat t1/NGC-6285-Lum.fits --mesh 256 --plot
+  synth-flat t1 --mask-region 2170,1490,120 --mask-region 1800,900,60 --write
+"""
+
+import argparse
+import glob
+import os
+import sys
+from datetime import datetime
+
+import numpy as np
+from astropy.io import fits
+from scipy import ndimage
+from scipy.interpolate import RectBivariateSpline
+
+OUT_SUFFIXES = ('-clean', '-synthflat', '-crop')
+
+
+# ----------------------------------------------------------------------------
+# helpers
+# ----------------------------------------------------------------------------
+
+def robust_stats(a):
+    med = float(np.median(a))
+    sig = float(np.median(np.abs(a - med))) * 1.4826
+    return med, sig
+
+
+def largest_rectangle(mask):
+    """Largest axis-aligned all-True rectangle in a boolean 2D array.
+    Returns (y0, y1, x0, x1) half-open. Histogram/stack method, O(H*W)."""
+    H, W = mask.shape
+    heights = np.zeros(W, dtype=int)
+    best = (0, 0, 0, 0, 0)           # area, y0, y1, x0, x1
+    for y in range(H):
+        heights = np.where(mask[y], heights + 1, 0)
+        stack = []
+        for x in range(W + 1):
+            h = heights[x] if x < W else 0
+            start = x
+            while stack and stack[-1][1] >= h:
+                sx, sh = stack.pop()
+                area = sh * (x - sx)
+                if area > best[0]:
+                    best = (area, y - sh + 1, y + 1, sx, x)
+                start = sx
+            stack.append((start, h))
+    return best[1:]
+
+
+def common_crop_box(valids, step=4, margin=2):
+    """Crop box valid in all channels. Computed on a step-subsampled mask
+    (speed), then shrunk by one cell + margin to be safe."""
+    m = np.logical_and.reduce([v for v in valids])
+    m = ndimage.binary_erosion(m, iterations=margin)
+    small = m[::step, ::step]
+    y0, y1, x0, x1 = largest_rectangle(small)
+    # convert back to full resolution, conservatively inside the cells
+    Y0, Y1 = (y0 + 1) * step, (y1 - 1) * step
+    X0, X1 = (x0 + 1) * step, (x1 - 1) * step
+    return Y0, Y1, X0, X1
+
+
+def source_mask(img, valid, nsigma, grow, big_area, regions, cell):
+    """Boolean mask of pixels to exclude from background modelling. Detection
+    is relative to a coarse local background (median mesh over all valid
+    pixels) so that a gradient does not get masked as an 'object'."""
+    # coarse (2 cells), unsmoothed, so that it follows gradient and rings but
+    # not objects; detection on the residual against the true pixel noise
+    plane = fit_poly2d(img, valid, 1)
+    bg0, _, _ = mesh_background(img - plane, valid, 2 * cell, smooth=0)
+    resid = img - plane - bg0
+    med, sig = robust_stats(resid[valid])
+    # local noise map: edges of a dithered stack are noisier than the centre
+    sigmap, _, _ = mesh_background(np.abs(resid - med) * 1.4826, valid, 2 * cell, smooth=0)
+    sigmap = np.maximum(sigmap, 0.5 * sig)
+    sm = ndimage.gaussian_filter(resid, 1.5)
+    det = (sm > med + nsigma * sigmap) & valid
+    # label connected components; bigger ones get a wider halo
+    lab, n = ndimage.label(det)
+    mask = ndimage.binary_dilation(det, iterations=grow)
+    if n:
+        areas = ndimage.sum(det, lab, index=np.arange(1, n + 1))
+        big = np.nonzero(areas >= big_area)[0] + 1
+        if len(big):
+            # dilation radius ~ 1.5 x equivalent radius of the component, capped
+            for lbl in big:
+                r = int(min(1.0 * np.sqrt(areas[lbl - 1] / np.pi), 150))
+                comp = lab == lbl
+                ys, xs = np.nonzero(comp)
+                y0, y1 = max(ys.min() - r, 0), min(ys.max() + r + 1, img.shape[0])
+                x0, x1 = max(xs.min() - r, 0), min(xs.max() + r + 1, img.shape[1])
+                sub = ndimage.binary_dilation(comp[y0:y1, x0:x1], iterations=r)
+                mask[y0:y1, x0:x1] |= sub
+    for (cx, cy, r) in regions:
+        yy, xx = np.ogrid[:img.shape[0], :img.shape[1]]
+        mask |= (xx - cx) ** 2 + (yy - cy) ** 2 <= r * r
+    mask |= ~valid
+    return mask
+
+
+def fit_poly2d(img, good, order, nsamp=200000, clip=3.0, iters=4):
+    """Least-squares 2D polynomial of given order on 'good' pixels (subsampled),
+    with iterated sigma clipping. Returns the model over the full image."""
+    H, W = img.shape
+    ys, xs = np.nonzero(good)
+    if len(ys) > nsamp:
+        sel = np.random.default_rng(0).choice(len(ys), nsamp, replace=False)
+        ys, xs = ys[sel], xs[sel]
+    z = img[ys, xs].astype(np.float64)
+    # normalised coordinates for conditioning
+    xn = (xs - W / 2) / W
+    yn = (ys - H / 2) / H
+    terms = [(i, j) for i in range(order + 1) for j in range(order + 1 - i)]
+    A = np.stack([xn ** i * yn ** j for i, j in terms], axis=1)
+    keep = np.ones(len(z), bool)
+    for _ in range(iters):
+        coef, *_ = np.linalg.lstsq(A[keep], z[keep], rcond=None)
+        res = z - A @ coef
+        s = np.median(np.abs(res[keep])) * 1.4826
+        keep = np.abs(res) < clip * s
+    yy, xx = np.mgrid[0:H, 0:W]
+    xn = (xx - W / 2) / W
+    yn = (yy - H / 2) / H
+    model = np.zeros((H, W), np.float64)
+    for c, (i, j) in zip(coef, terms):
+        model += c * xn ** i * yn ** j
+    return model.astype(np.float32)
+
+
+def mesh_background(img, good, cell, min_frac=0.25, smooth=0.7):
+    """Median per cell of the unmasked pixels, holes filled from neighbours,
+    bicubic spline to full resolution, smoothed by 'smooth' cells."""
+    H, W = img.shape
+    gh, gw = max(H // cell, 4), max(W // cell, 4)
+    ch, cw = H / gh, W / gw
+    mesh = np.full((gh, gw), np.nan, np.float64)
+    for i in range(gh):
+        y0, y1 = int(i * ch), int((i + 1) * ch)
+        for j in range(gw):
+            x0, x1 = int(j * cw), int((j + 1) * cw)
+            g = good[y0:y1, x0:x1]
+            if g.mean() >= min_frac:
+                mesh[i, j] = np.median(img[y0:y1, x0:x1][g])
+    holes = np.isnan(mesh)
+    if holes.all():
+        raise RuntimeError('no unmasked background anywhere')
+    if holes.any():
+        idx = ndimage.distance_transform_edt(holes, return_distances=False, return_indices=True)
+        mesh = mesh[tuple(idx)]
+    if smooth:
+        mesh = ndimage.gaussian_filter(mesh, smooth)
+    yc = (np.arange(gh) + 0.5) * ch
+    xc = (np.arange(gw) + 0.5) * cw
+    # pin the grid at the image edges (linear continuation of the outer cells)
+    # so the spline interpolates everywhere instead of extrapolating
+    def pad(axis_vals, m, axis):
+        first, second = np.take(m, 0, axis), np.take(m, 1, axis)
+        last, before = np.take(m, -1, axis), np.take(m, -2, axis)
+        lo = first + (first - second) * 0.5 * (axis_vals[0] / (axis_vals[1] - axis_vals[0])) * 2
+        hi = last + (last - before) * 0.5
+        return np.concatenate([np.expand_dims(lo, axis), m, np.expand_dims(hi, axis)], axis)
+    mesh = pad(yc, mesh, 0)
+    mesh = pad(xc, mesh, 1)
+    yc = np.concatenate([[0.0], yc, [H - 1.0]])
+    xc = np.concatenate([[0.0], xc, [W - 1.0]])
+    spl = RectBivariateSpline(yc, xc, mesh, kx=3, ky=3, s=0)
+    return spl(np.arange(H), np.arange(W)).astype(np.float32), int(holes.sum()), (gh, gw)
+
+
+def radial_model(ratio, good, center=None, binpx=4, smooth=2.0):
+    """Concentric-ring model of 'ratio': azimuthal median per binpx-wide radial
+    bin around 'center' (fitted if None), lightly smoothed, as a full image."""
+    H, W = ratio.shape
+    sub = 4
+    r4 = ratio[::sub, ::sub]
+    g4 = good[::sub, ::sub]
+    yy4, xx4 = np.mgrid[0:r4.shape[0], 0:r4.shape[1]]
+
+    def resid(cy, cx):
+        rr = np.hypot((xx4 - cx / sub), (yy4 - cy / sub))
+        rb = (rr * sub / (8 * binpx)).astype(int)
+        nb = rb.max() + 1
+        cnt = np.bincount(rb[g4], minlength=nb)
+        sm = np.bincount(rb[g4], weights=r4[g4], minlength=nb)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            prof = np.where(cnt > 20, sm / np.maximum(cnt, 1), np.nan)
+        model = prof[rb]
+        d = (r4 - model)[g4]
+        return float(np.nanstd(d))
+
+    if center is None:
+        cy, cx = H / 2, W / 2
+        for step in (256, 128, 64, 32, 16):
+            cands = [(cy + dy, cx + dx) for dy in (-step, 0, step) for dx in (-step, 0, step)]
+            cy, cx = min(cands, key=lambda c: resid(*c))
+        center = (cy, cx)
+    cy, cx = center
+
+    yy, xx = np.mgrid[0:H, 0:W]
+    rr = np.hypot(xx - cx, yy - cy)
+    rb = (rr / binpx).astype(int)
+    nb = rb.max() + 1
+    cnt = np.bincount(rb[good], minlength=nb)
+    sm = np.bincount(rb[good], weights=ratio[good], minlength=nb)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        prof = np.where(cnt > 50, sm / np.maximum(cnt, 1), np.nan)
+    bad = np.isnan(prof)
+    if bad.all():
+        return np.ones((H, W), np.float32), center
+    if bad.any():
+        idx = ndimage.distance_transform_edt(bad, return_distances=False, return_indices=True)
+        prof = prof[tuple(idx)]
+    prof = ndimage.gaussian_filter1d(prof, smooth)
+    return prof[rb].astype(np.float32), center
+
+
+def detect_edge_trim(clean, valid, thr=0.00025, maxscan=300, pad=16):
+    """How many pixels to trim per edge (top, bottom, left, right).
+    An edge band = row/col medians deviating more than thr (fraction of the
+    background) from the interior, scanned from each edge inward."""
+    interior = float(np.median(clean[maxscan:-maxscan, maxscan:-maxscan]))
+    if interior <= 0:
+        return (0, 0, 0, 0)
+    rm = np.median(clean, axis=1) / interior - 1
+    cm = np.median(clean, axis=0) / interior - 1
+    def scan(p):
+        dev = np.abs(p[:maxscan]) > thr
+        if not dev.any():
+            return 0
+        return min(int(np.nonzero(dev)[0].max()) + 1 + pad, maxscan)
+    return (scan(rm), scan(rm[::-1]), scan(cm), scan(cm[::-1]))
+
+
+def stretch(a, valid, lo, hi):
+    return np.clip((a - lo) / (hi - lo), 0, 1) * valid
+
+
+# ----------------------------------------------------------------------------
+# main processing
+# ----------------------------------------------------------------------------
+
+def load(path, lenient=False):
+    with fits.open(path, memmap=False) as hd:
+        data = hd[0].data.astype(np.float32)
+        header = hd[0].header.copy()
+    if data.ndim == 3 and data.shape[0] == 1:
+        data = data[0]
+    if data.ndim != 2:
+        if lenient:
+            print(f'skipping {path}: not a 2D mono image (shape {data.shape})', file=sys.stderr)
+            return None, None
+        sys.exit(f'{path}: expected a 2D mono image, got shape {data.shape}')
+    return data, header
+
+
+OUT_DIR = None
+
+
+def out_name(path, suffix, ext=None):
+    base, e = os.path.splitext(path)
+    if OUT_DIR:
+        base = os.path.join(OUT_DIR, os.path.basename(base))
+    return f'{base}{suffix}{ext or e}'
+
+
+def process_channel(name, img, valid, hdr, a, log):
+    H, W = img.shape
+    med0, sig0 = robust_stats(img[valid])
+    cell = a.mesh or max(32, int(round(min(H, W) / 45)))
+    log(f'  size {W}x{H}, background {med0:.6g}, noise {sig0:.3g}, mesh cell {cell} px')
+
+    mask = source_mask(img, valid, a.mask_sigma, a.mask_grow, a.big_area, a.regions, cell)
+    good = ~mask
+    log(f'  masked {mask.mean():.1%} of pixels ({(~valid).mean():.1%} invalid border)')
+
+    # --- additive gradient
+    if a.grad_order >= 0:
+        grad = fit_poly2d(img, good, a.grad_order)
+        grad -= float(grad[valid].mean())          # keep the overall level
+        g_pp = float(grad[valid].max() - grad[valid].min())
+        log(f'  gradient order {a.grad_order}: peak-to-peak {g_pp:.4g} = {g_pp / med0:.2%} of background')
+        step1 = img - grad
+    else:
+        grad = np.zeros_like(img)
+        step1 = img
+
+    # --- multiplicative flat
+    model, holes, (gh, gw) = mesh_background(step1, good, cell)
+    if a.radial:
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratio = np.where(model > 0, step1 / model, 1.0)
+        rad, center = radial_model(ratio, good, a.center)
+        model = model * rad
+        log(f'  radial rings: {rad[valid].min():.4f} .. {rad[valid].max():.4f} '
+            f'(centre x={center[1]:.0f} y={center[0]:.0f})')
+    flat = model / float(model[valid].mean())
+    log(f'  flat ({gh}x{gw} cells, {holes} filled): {flat[valid].min():.4f} .. {flat[valid].max():.4f}'
+        f'  (peak-to-peak {flat[valid].max() - flat[valid].min():.2%})')
+
+    clean = np.where(valid, step1 / flat, 0).astype(np.float32)
+
+    # --- how flat is it now? large-scale structure before/after (masked mesh)
+    resid_before, _, _ = mesh_background(img, good, cell)
+    resid_after, _, _ = mesh_background(clean, good, cell)
+    pp_b = resid_before[valid].max() - resid_before[valid].min()
+    pp_a = resid_after[valid].max() - resid_after[valid].min()
+    log(f'  large-scale background peak-to-peak: before {pp_b / med0:.2%}  after {pp_a / med0:.2%}')
+
+    results = dict(clean=clean, flat=flat.astype(np.float32), grad=grad, mask=mask,
+                   resid_before=resid_before, resid_after=resid_after, med=med0, sig=sig0, cell=cell)
+    return results
+
+
+def write_fits(path, data, hdr, history):
+    h = hdr.copy()
+    h['BITPIX'] = -32
+    for line in history:
+        h.add_history(line)
+    fits.PrimaryHDU(data=data.astype(np.float32), header=h).writeto(path, overwrite=True)
+
+
+def plot_channel(png, name, img, valid, r):
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    med, sig = r['med'], r['sig']
+    # same stretch for before and after: narrow window around the background
+    cmed, csig = robust_stats(r['clean'][valid])
+    lo, hi = cmed - 2 * csig, cmed + 10 * csig
+    fig, axes = plt.subplots(2, 3, figsize=(16, 8.5))
+    ax = axes.ravel()
+    ax[0].imshow(stretch(img, valid, lo, hi), cmap='gray', origin='lower')
+    ax[0].set_title(f'{name}: before (bg {med:.5g})')
+    ax[1].imshow(r['mask'], cmap='gray_r', origin='lower')
+    ax[1].set_title(f'mask ({r["mask"].mean():.1%})')
+    g = r['grad']
+    im = ax[2].imshow(np.where(valid, g / med * 100, np.nan), cmap='coolwarm', origin='lower')
+    ax[2].set_title('additive gradient (% of bg)')
+    plt.colorbar(im, ax=ax[2], fraction=0.03)
+    im = ax[3].imshow(np.where(valid, r['flat'], np.nan), cmap='viridis', origin='lower')
+    ax[3].set_title(f'synthetic flat (mesh {r["cell"]} px)')
+    plt.colorbar(im, ax=ax[3], fraction=0.03)
+    ax[4].imshow(stretch(r['clean'], valid, lo, hi), cmap='gray', origin='lower')
+    ax[4].set_title('after (same stretch)')
+    ra = r['resid_after']
+    im = ax[5].imshow(np.where(valid, (ra - ra[valid].mean()) / med * 100, np.nan), cmap='coolwarm',
+                      origin='lower')
+    ax[5].set_title('remaining large-scale bg (% of bg)')
+    plt.colorbar(im, ax=ax[5], fraction=0.03)
+    for a_ in ax:
+        a_.set_xticks([])
+        a_.set_yticks([])
+    fig.tight_layout()
+    fig.savefig(png, dpi=90)
+    plt.close(fig)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('inputs', nargs='+',
+                    help='stacked channel FITS files, or a directory (all *.fits in it that are '
+                         'not -clean/-synthflat/-crop outputs)')
+    g = ap.add_argument_group('crop')
+    g.add_argument('--crop', action='store_true',
+                   help='crop all channels to the largest rectangle that is valid in every channel')
+    g.add_argument('--keep-crop', action='store_true', help='with --write: also write <name>-crop.fits')
+    g.add_argument('--edge-trim', type=int, default=-1, metavar='PX',
+                   help='trim the stack-coverage bands at the edges: -1 = detect automatically '
+                        '(default), 0 = off, N = fixed N px on every edge')
+    g = ap.add_argument_group('masking')
+    g.add_argument('--mask-sigma', type=float, default=3.0, metavar='S',
+                   help='mask pixels brighter than the local background + S x pixel noise '
+                        '(default 3)')
+    g.add_argument('--mask-grow', type=int, default=6, metavar='PX',
+                   help='dilate every detection by PX pixels (default 6)')
+    g.add_argument('--big-area', type=int, default=400, metavar='PX2',
+                   help='components with more than PX2 pixels (galaxies, bright star haloes) get '
+                        'an extra halo of 1 x their radius, max 150 px (default 400)')
+    g.add_argument('--mask-region', action='append', default=[], metavar='X,Y,R',
+                   help='also mask a circle (pixel coords of the cropped image); repeatable')
+    g = ap.add_argument_group('background model')
+    g.add_argument('--grad-order', type=int, default=1, metavar='N',
+                   help='order of the additive polynomial gradient (1 = plane; 0 = none; default 1)')
+    g.add_argument('--mesh', type=int, default=None, metavar='PX',
+                   help='mesh cell size for the multiplicative flat (default min(w,h)/45, '
+                        '~65 px on a 3k-high stack). Smaller follows rings better but starts '
+                        'absorbing real large-scale nebulosity into the flat')
+    g.add_argument('--radial', action='store_true',
+                   help='also fit a radial ring profile with fitted centre on top of the mesh '
+                        '(off by default: a fine mesh follows the rings better when they are '
+                        'not perfectly concentric)')
+    g.add_argument('--center', metavar='X,Y', help='ring centre for --radial (default: fitted)')
+    g = ap.add_argument_group('output')
+    g.add_argument('--write', action='store_true',
+                   help='write <name>-clean.fits and <name>-synthflat.fits next to the inputs')
+    g.add_argument('--plot', action='store_true', help='write <name>-synthflat.png diagnostics')
+    g.add_argument('--out-dir', metavar='DIR', help='put outputs here instead of next to the inputs')
+    a = ap.parse_args()
+
+    global OUT_DIR
+    if a.out_dir:
+        os.makedirs(a.out_dir, exist_ok=True)
+        OUT_DIR = a.out_dir
+    a.regions = []
+    for s in a.mask_region:
+        x, y, r = (float(v) for v in s.split(','))
+        a.regions.append((x, y, r))
+    if a.center:
+        x, y = (float(v) for v in a.center.split(','))
+        a.center = (y, x)
+
+    files = []
+    from_dir = set()
+    for inp in a.inputs:
+        if os.path.isdir(inp):
+            for f in sorted(glob.glob(os.path.join(inp, '*.fit*'))):
+                base = os.path.splitext(os.path.basename(f))[0]
+                if not base.endswith(OUT_SUFFIXES):
+                    files.append(f)
+                    from_dir.add(f)
+        else:
+            files.append(inp)
+    if not files:
+        sys.exit('no input files')
+
+    log = lambda m: print(m, flush=True)
+    imgs, hdrs, valids, kept = [], [], [], []
+    for f in files:
+        d, h = load(f, lenient=f in from_dir)
+        if d is None:
+            continue
+        kept.append(f)
+        imgs.append(d)
+        hdrs.append(h)
+        valids.append(np.isfinite(d) & (d > 0))
+    files = kept
+    if not files:
+        sys.exit('no usable 2D mono images found')
+    shapes = {d.shape for d in imgs}
+    if a.crop and len(shapes) > 1:
+        sys.exit(f'channels differ in size {shapes}; cannot crop to a common area')
+
+    history = [f'synth-flat {datetime.now():%Y-%m-%d %H:%M} args: ' +
+               ' '.join(sys.argv[1:])]
+    crop = None
+    if a.crop:
+        y0, y1, x0, x1 = common_crop_box(valids)
+        crop = (y0, y1, x0, x1)
+        log(f'common crop: x {x0}..{x1}, y {y0}..{y1}  -> {x1 - x0}x{y1 - y0} '
+            f'(from {imgs[0].shape[1]}x{imgs[0].shape[0]})')
+        imgs = [d[y0:y1, x0:x1] for d in imgs]
+        valids = [v[y0:y1, x0:x1] for v in valids]
+        for h in hdrs:
+            if 'CRPIX1' in h:
+                h['CRPIX1'] = h['CRPIX1'] - x0
+                h['CRPIX2'] = h['CRPIX2'] - y0
+        history.append(f'cropped to x {x0}..{x1}, y {y0}..{y1} (common valid area of {len(files)} channels)')
+
+    def run_all(imgs, valids):
+        out = []
+        for f, img, valid in zip(files, imgs, valids):
+            name = os.path.splitext(os.path.basename(f))[0]
+            log(f'{name}:')
+            out.append(process_channel(name, img, valid, hdrs[files.index(f)], a, log))
+        return out
+
+    results = run_all(imgs, valids)
+
+    for _pass in range(3 if a.edge_trim != 0 else 0):
+        trims = [detect_edge_trim(r['clean'], v) for r, v in zip(results, valids)]
+        t, b, l, rr = (max(x) for x in zip(*trims))
+        if a.edge_trim > 0:
+            if _pass:
+                break
+            t = b = l = rr = a.edge_trim
+        if any((t, b, l, rr)):
+            log(f'edge bands detected -> trimming top {t}, bottom {b}, left {l}, right {rr} px '
+                f'and recomputing')
+            H, W = imgs[0].shape
+            imgs = [d[t:H - b, l:W - rr] for d in imgs]
+            valids = [v[t:H - b, l:W - rr] for v in valids]
+            for h in hdrs:
+                if 'CRPIX1' in h:
+                    h['CRPIX1'] = h['CRPIX1'] - l
+                    h['CRPIX2'] = h['CRPIX2'] - t
+            history.append(f'edge-trimmed top {t}, bottom {b}, left {l}, right {rr} px '
+                           f'(stack coverage bands)')
+            results = run_all(imgs, valids)
+        else:
+            break
+
+    for f, img, valid, hdr, r in zip(files, imgs, valids, hdrs, results):
+        name = os.path.splitext(os.path.basename(f))[0]
+        if a.plot:
+            png = out_name(f, '-synthflat', '.png')
+            plot_channel(png, name, img, valid, r)
+            log(f'  plot: {png}')
+        if a.write:
+            hist = history + [
+                f'synth-flat: masked {r["mask"].mean():.1%}, gradient order {a.grad_order}, '
+                f'mesh {r["cell"]} px{", radial" if a.radial else ""}',
+            ]
+            write_fits(out_name(f, '-clean'), r['clean'], hdr,
+                       hist + ['clean = (image - gradient) / synthetic flat'])
+            write_fits(out_name(f, '-synthflat'), r['flat'], hdr, hist + ['synthetic flat, mean 1'])
+            log(f'  wrote {out_name(f, "-clean")} and {out_name(f, "-synthflat")}')
+            if a.keep_crop:
+                write_fits(out_name(f, '-crop'), img, hdr, history)
+    if not a.write:
+        log('(report only - use --write to produce the FITS files)')
+
+
+if __name__ == '__main__':
+    main()
