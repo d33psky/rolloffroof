@@ -359,8 +359,25 @@ def stretch(a, valid, lo, hi):
 
 
 def find_starnet(sn_dir):
-    """Locate the StarNet CLI in sn_dir: either the new starnet2 (extracted
-    .deb root or a dir holding starnet2 + libs) or the old starnet++."""
+    """Locate the StarNet CLI. sn_dir 'auto' searches the system installation
+    (PATH / /usr/lib/starnet2, i.e. the .deb installed with apt) and then
+    ~/astro/starnet2/*; otherwise sn_dir is an extracted .deb root or a
+    directory holding starnet2 + libs, or the old starnet++ package dir."""
+    if sn_dir == 'auto':
+        import shutil
+        exe = shutil.which('starnet2')
+        if exe:
+            lib = '/usr/lib/starnet2'
+            return 'new', exe, lib if os.path.isdir(lib) else os.path.dirname(exe)
+        for cand in sorted(glob.glob(os.path.expanduser('~/astro/starnet2/*'))):
+            if os.path.isdir(cand):
+                try:
+                    return find_starnet(cand)
+                except SystemExit:
+                    continue
+        sys.exit('--starnet: no starnet2 found on PATH, in /usr/lib/starnet2 or under '
+                 '~/astro/starnet2/. Install the .deb (sudo apt install ./StarNet2_*.deb) '
+                 'or pass --starnet DIR.')
     for exe, lib in [('usr/bin/starnet2', 'usr/lib/starnet2'),
                      ('bin/starnet2', 'lib/starnet2'),
                      ('starnet2', '.')]:
@@ -640,10 +657,13 @@ def main():
     g.add_argument('--no-subtract-halos', dest='subtract_halos', action='store_false',
                    help='with --starnet: skip the stage-2 mesh that flattens star reflection '
                         'halos (keeps halo glow in the image)')
-    g.add_argument('--starnet', metavar='DIR',
-                   help='remove stars with the StarNet++ CLI in DIR before modelling the '
-                        'background (best halo handling: star halos stay in the image, the '
-                        'model never follows them). Writes/reuses <name>-starless.fits')
+    g.add_argument('--starnet', nargs='?', const='auto', metavar='DIR',
+                   help='remove stars with the StarNet CLI before modelling the background '
+                        '(two-stage correction: rings/hole from the starless image, star halos '
+                        'from a second mesh). Without a value the installed starnet2 is used '
+                        '(PATH, /usr/lib/starnet2, ~/astro/starnet2/*); DIR points at an '
+                        'extracted .deb tree or an old starnet++ package. Writes/reuses '
+                        '<name>-starless.fits')
     g.add_argument('--plot', action='store_true', help='write <name>-synthflat.png diagnostics')
     g.add_argument('--out-dir', metavar='DIR', help='put outputs here instead of next to the inputs')
     a = ap.parse_args()
@@ -708,7 +728,7 @@ def main():
         history.append(f'cropped to x {x0}..{x1}, y {y0}..{y1} (common valid area of {len(files)} channels)')
 
     if a.starnet:
-        sn_dir = os.path.abspath(a.starnet)
+        sn_dir = a.starnet if a.starnet == 'auto' else os.path.abspath(a.starnet)
         starlesses = []
         for f, img, valid in zip(files, imgs, valids):
             cache = out_name(f, '-starless')
