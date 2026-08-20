@@ -465,14 +465,20 @@ def process_channel(name, img, valid, hdr, a, log, starless=None):
                 x1 = min(sl_[1].stop + r + 2, W)
                 sub = lab[y0:y1, x0:x1] == i + 1
                 mask[y0:y1, x0:x1] |= ndimage.distance_transform_edt(~sub) <= r
-        mask |= ~valid
         for (cx, cy, r) in a.regions:
             yy, xx = np.ogrid[:H, :W]
             mask |= (xx - cx) ** 2 + (yy - cy) ** 2 <= r * r
+        obj_mask = mask | ~valid          # galaxies + hand regions only
+        # StarNet leaves a faint depressed "stamp" in the starless under every
+        # star: exclude star footprints from the model source as well
+        layer0 = ndimage.gaussian_filter(img - starless, 2)
+        stamps = ndimage.binary_dilation((layer0 > 3 * sig0) & valid, iterations=8)
+        mask = obj_mask | stamps
     else:
         src = img
         mask = source_mask(img, valid, a.mask_sigma, a.mask_grow, a.big_area, a.regions, cell,
                            a.big_halo)
+        obj_mask = mask
     good = ~mask
     log(f'  masked {mask.mean():.1%} of pixels ({(~valid).mean():.1%} invalid border)')
 
@@ -508,14 +514,16 @@ def process_channel(name, img, valid, hdr, a, log, starless=None):
 
     clean = np.where(valid, step1 / flat, 0).astype(np.float32)
     if starless is not None and a.subtract_halos:
-        # smooth glow of star reflection halos: greyscale OPENING of the star
-        # layer (img - starless). An opening is pointwise <= the data, so it
-        # can never over-subtract (no dark rings between close pairs); it
-        # removes structures smaller than the window (star cores) and follows
-        # the halo envelope from below. 4x downsample for speed. The layer is
-        # zeroed under the object mask: what StarNet nibbles off galaxy
-        # outskirts must not be subtracted as "halo".
-        layer = np.where(valid & ~mask, img - starless, 0)
+        # smooth glow of star reflection halos: greyscale OPENING of the
+        # corrected image above its own background. An opening is pointwise <=
+        # the data, so it can never over-subtract (no dark rings between close
+        # pairs); it removes structures smaller than the window (star cores)
+        # and follows the halo envelope from below. Built from the corrected
+        # ORIGINAL (not img - starless: StarNet's stamp depressions would
+        # inflate that layer and dig dark rims around every star). Objects are
+        # zeroed so galaxies are never subtracted. 4x downsample for speed.
+        cmed = float(np.median(clean[valid]))
+        layer = np.where(valid & ~obj_mask, clean - cmed, 0)
         ds = 4
         Hd, Wd = (H // ds) * ds, (W // ds) * ds
         small = layer[:Hd, :Wd].reshape(Hd // ds, ds, Wd // ds, ds).mean(axis=(1, 3))
@@ -524,6 +532,7 @@ def process_channel(name, img, valid, hdr, a, log, starless=None):
         glow = glow[:H, :W].astype(np.float32)
         log(f'  halo glow subtracted: up to {glow[valid].max() / med0:.2%} of background')
         clean = np.where(valid, clean - glow, 0).astype(np.float32)
+        clean[~valid] = 0
     # background-only version for diagnostics/edge-trim: with --starnet the
     # clean image legitimately keeps star halos, which must not be mistaken
     # for background residuals
