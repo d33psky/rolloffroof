@@ -514,25 +514,19 @@ def process_channel(name, img, valid, hdr, a, log, starless=None):
 
     clean = np.where(valid, step1 / flat, 0).astype(np.float32)
     if starless is not None and a.subtract_halos:
-        # smooth glow of star reflection halos: greyscale OPENING of the
-        # corrected image above its own background. An opening is pointwise <=
-        # the data, so it can never over-subtract (no dark rings between close
-        # pairs); it removes structures smaller than the window (star cores)
-        # and follows the halo envelope from below. Built from the corrected
-        # ORIGINAL (not img - starless: StarNet's stamp depressions would
-        # inflate that layer and dig dark rims around every star). Objects are
-        # zeroed so galaxies are never subtracted. 4x downsample for speed.
-        cmed = float(np.median(clean[valid]))
-        layer = np.where(valid & ~obj_mask, clean - cmed, 0)
-        ds = 4
-        Hd, Wd = (H // ds) * ds, (W // ds) * ds
-        small = layer[:Hd, :Wd].reshape(Hd // ds, ds, Wd // ds, ds).mean(axis=(1, 3))
-        gsm = ndimage.gaussian_filter(ndimage.grey_opening(small, size=13), 1.5)
-        glow = np.clip(ndimage.zoom(gsm, (H / gsm.shape[0], W / gsm.shape[1]), order=1), 0, None)
-        glow = glow[:H, :W].astype(np.float32)
-        log(f'  halo glow subtracted: up to {glow[valid].max() / med0:.2%} of background')
-        clean = np.where(valid, clean - glow, 0).astype(np.float32)
-        clean[~valid] = 0
+        # stage 2: classic source-masked median mesh on the corrected image,
+        # subtracted additively. This flattens star halos exactly like the
+        # mesh-only pipeline (galaxies protected by the same masking), but on
+        # data whose gradient/rings/central hole stage 1 already removed - so
+        # masked cells can be filled LOCALLY (no radial ring-average, no
+        # moats around masked pairs).
+        mask2 = source_mask(clean, valid, a.mask_sigma, a.mask_grow, a.big_area, a.regions,
+                            65, a.big_halo)
+        resid2, _, _ = mesh_background(clean, valid & ~mask2, 65, fill='nearest')
+        resid2 -= float(resid2[valid].mean())
+        log(f'  stage-2 mesh (halos): peak-to-peak {(resid2[valid].max() - resid2[valid].min()) / med0:.2%} '
+            f'of background')
+        clean = np.where(valid, clean - resid2, 0).astype(np.float32)
     # background-only version for diagnostics/edge-trim: with --starnet the
     # clean image legitimately keeps star halos, which must not be mistaken
     # for background residuals
@@ -644,8 +638,8 @@ def main():
                    help='with --starnet: protect ALL structure StarNet leaves (real nebulosity) '
                         'instead of flattening huge faint leftovers (galaxy-field default)')
     g.add_argument('--no-subtract-halos', dest='subtract_halos', action='store_false',
-                   help='with --starnet: keep star reflection-halo glow in the image instead of '
-                        'subtracting its smooth component')
+                   help='with --starnet: skip the stage-2 mesh that flattens star reflection '
+                        'halos (keeps halo glow in the image)')
     g.add_argument('--starnet', metavar='DIR',
                    help='remove stars with the StarNet++ CLI in DIR before modelling the '
                         'background (best halo handling: star halos stay in the image, the '
