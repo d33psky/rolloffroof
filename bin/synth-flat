@@ -118,7 +118,7 @@ def common_crop_box(valids, step=4, margin=2):
     return Y0, Y1, X0, X1
 
 
-def source_mask(img, valid, nsigma, grow, big_area, regions, cell):
+def source_mask(img, valid, nsigma, grow, big_area, regions, cell, halo=1.0):
     """Boolean mask of pixels to exclude from background modelling. Detection
     is relative to a coarse local background (median mesh over all valid
     pixels) so that a gradient does not get masked as an 'object'."""
@@ -142,7 +142,7 @@ def source_mask(img, valid, nsigma, grow, big_area, regions, cell):
         if len(big):
             # dilation radius ~ 1.5 x equivalent radius of the component, capped
             for lbl in big:
-                r = int(min(1.0 * np.sqrt(areas[lbl - 1] / np.pi), 150))
+                r = int(min(halo * np.sqrt(areas[lbl - 1] / np.pi), 300))
                 comp = lab == lbl
                 ys, xs = np.nonzero(comp)
                 y0, y1 = max(ys.min() - r, 0), min(ys.max() + r + 1, img.shape[0])
@@ -185,9 +185,68 @@ def fit_poly2d(img, good, order, nsamp=200000, clip=3.0, iters=4):
     return model.astype(np.float32)
 
 
-def mesh_background(img, good, cell, min_frac=0.25, smooth=0.7):
-    """Median per cell of the unmasked pixels, holes filled from neighbours,
-    bicubic spline to full resolution, smoothed by 'smooth' cells."""
+def fit_cell_center(mesh, valid_cells, ch, cw):
+    """Ring centre (in px) that minimises the scatter of cell values around
+    their per-radius median. Grid search over the central half."""
+    gh, gw = mesh.shape
+    yy, xx = np.mgrid[0:gh, 0:gw]
+    ys = (yy + 0.5) * ch
+    xs = (xx + 0.5) * cw
+    vals = mesh[valid_cells]
+    H, W = gh * ch, gw * cw
+
+    def cost(cy, cx):
+        r = np.hypot(xs - cx, ys - cy)[valid_cells]
+        rb = (r / (2 * max(ch, cw))).astype(int)
+        nb = rb.max() + 1
+        med = np.full(nb, np.nan)
+        for b in range(nb):
+            m = rb == b
+            if m.sum() >= 4:
+                med[b] = np.median(vals[m])
+        ok = ~np.isnan(med[rb])
+        return float(np.abs(vals - med[rb])[ok].sum()) if ok.any() else np.inf
+
+    cy, cx = H / 2, W / 2
+    for step in (H / 8, H / 16, H / 32):
+        cands = [(cy + dy, cx + dx) for dy in (-step, 0, step) for dx in (-step, 0, step)]
+        cy, cx = min(cands, key=lambda c: cost(*c))
+    return cy, cx
+
+
+def radial_fill(mesh, holes, center, ch, cw):
+    """Fill NaN cells from the median of valid cells at the same ring radius."""
+    gh, gw = mesh.shape
+    cy, cx = center
+    yy, xx = np.mgrid[0:gh, 0:gw]
+    r = np.hypot((xx + 0.5) * cw - cx, (yy + 0.5) * ch - cy)
+    binw = 1.5 * max(ch, cw)
+    rb = (r / binw).astype(int)
+    nb = rb.max() + 1
+    prof = np.full(nb, np.nan)
+    valid = ~holes
+    for b in range(nb):
+        m = valid & (rb == b)
+        if m.sum() >= 3:
+            prof[b] = np.median(mesh[m])
+    bad = np.isnan(prof)
+    if bad.all():
+        return mesh
+    if bad.any():
+        idx = ndimage.distance_transform_edt(bad, return_distances=False, return_indices=True)
+        prof = prof[tuple(idx)]
+    prof = ndimage.gaussian_filter1d(prof, 1.0)
+    out = mesh.copy()
+    out[holes] = prof[rb[holes]]
+    return out
+
+
+def mesh_background(img, good, cell, min_frac=0.25, smooth=0.7, fill='nearest', center=None):
+    """Median per cell of the unmasked pixels, holes filled (fill='nearest':
+    from neighbouring cells; fill='radial': from cells at the same ring radius
+    around 'center', fitted if None - keeps the ring/central-hole depth under
+    masked objects), bicubic spline to full resolution, smoothed by 'smooth'
+    cells."""
     H, W = img.shape
     gh, gw = max(H // cell, 4), max(W // cell, 4)
     ch, cw = H / gh, W / gw
@@ -203,8 +262,14 @@ def mesh_background(img, good, cell, min_frac=0.25, smooth=0.7):
     if holes.all():
         raise RuntimeError('no unmasked background anywhere')
     if holes.any():
-        idx = ndimage.distance_transform_edt(holes, return_distances=False, return_indices=True)
-        mesh = mesh[tuple(idx)]
+        if fill == 'radial':
+            if center is None:
+                center = fit_cell_center(mesh, ~holes, ch, cw)
+            mesh = radial_fill(mesh, holes, center, ch, cw)
+            holes = np.isnan(mesh)
+        if holes.any():
+            idx = ndimage.distance_transform_edt(holes, return_distances=False, return_indices=True)
+            mesh = mesh[tuple(idx)]
     if smooth:
         mesh = ndimage.gaussian_filter(mesh, smooth)
     yc = (np.arange(gh) + 0.5) * ch
@@ -327,7 +392,8 @@ def process_channel(name, img, valid, hdr, a, log):
     cell = a.mesh or max(32, int(round(min(H, W) / 45)))
     log(f'  size {W}x{H}, background {med0:.6g}, noise {sig0:.3g}, mesh cell {cell} px')
 
-    mask = source_mask(img, valid, a.mask_sigma, a.mask_grow, a.big_area, a.regions, cell)
+    mask = source_mask(img, valid, a.mask_sigma, a.mask_grow, a.big_area, a.regions, cell,
+                       a.big_halo)
     good = ~mask
     log(f'  masked {mask.mean():.1%} of pixels ({(~valid).mean():.1%} invalid border)')
 
@@ -343,7 +409,7 @@ def process_channel(name, img, valid, hdr, a, log):
         step1 = img
 
     # --- multiplicative flat
-    model, holes, (gh, gw) = mesh_background(step1, good, cell)
+    model, holes, (gh, gw) = mesh_background(step1, good, cell, fill=a.fill, center=a.center)
     if a.radial:
         with np.errstate(divide='ignore', invalid='ignore'):
             ratio = np.where(model > 0, step1 / model, 1.0)
@@ -430,11 +496,11 @@ def main():
     g.add_argument('--mask-sigma', type=float, default=3.0, metavar='S',
                    help='mask pixels brighter than the local background + S x pixel noise '
                         '(default 3)')
-    g.add_argument('--mask-grow', type=int, default=6, metavar='PX',
-                   help='dilate every detection by PX pixels (default 6)')
+    g.add_argument('--mask-grow', type=int, default=10, metavar='PX',
+                   help='dilate every detection by PX pixels (default 10)')
     g.add_argument('--big-area', type=int, default=400, metavar='PX2',
                    help='components with more than PX2 pixels (galaxies, bright star haloes) get '
-                        'an extra halo of 1 x their radius, max 150 px (default 400)')
+                        'an extra halo of --big-halo x their radius, max 300 px (default 400)')
     g.add_argument('--mask-region', action='append', default=[], metavar='X,Y,R',
                    help='also mask a circle (pixel coords of the cropped image); repeatable')
     g = ap.add_argument_group('background model')
@@ -444,6 +510,13 @@ def main():
                    help='mesh cell size for the multiplicative flat (default min(w,h)/45, '
                         '~65 px on a 3k-high stack). Smaller follows rings better but starts '
                         'absorbing real large-scale nebulosity into the flat')
+    g.add_argument('--fill', choices=['radial', 'nearest'], default='radial',
+                   help='how masked mesh cells are filled: radial = from cells at the same '
+                        'ring radius (keeps the central hole / ring depth under masked '
+                        'galaxies; default), nearest = from neighbouring cells')
+    g.add_argument('--big-halo', type=float, default=1.0, metavar='F',
+                   help='extra mask halo around big components, F x their radius (default 1.0); '
+                        'smaller lets more pixels near galaxies constrain the model')
     g.add_argument('--radial', action='store_true',
                    help='also fit a radial ring profile with fitted centre on top of the mesh '
                         '(off by default: a fine mesh follows the rings better when they are '
