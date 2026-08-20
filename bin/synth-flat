@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["numpy", "scipy", "astropy", "matplotlib"]
+# dependencies = ["numpy", "scipy", "astropy", "matplotlib", "tifffile", "imagecodecs"]
 # ///
 """synth-flat - crop stacked channels to their common area, remove the additive
 gradient and divide out a synthetic flat, per channel.
@@ -70,7 +70,7 @@ from astropy.io import fits
 from scipy import ndimage
 from scipy.interpolate import RectBivariateSpline
 
-OUT_SUFFIXES = ('-clean', '-synthflat', '-crop')
+OUT_SUFFIXES = ('-clean', '-synthflat', '-crop', '-starless')
 
 
 # ----------------------------------------------------------------------------
@@ -337,11 +337,11 @@ def radial_model(ratio, good, center=None, binpx=4, smooth=2.0):
     return prof[rb].astype(np.float32), center
 
 
-def detect_edge_trim(clean, valid, thr=0.00025, maxscan=300, pad=16):
+def detect_edge_trim(clean, valid, thr=0.00025, maxscan=300, pad=16, refscan=300):
     """How many pixels to trim per edge (top, bottom, left, right).
     An edge band = row/col medians deviating more than thr (fraction of the
     background) from the interior, scanned from each edge inward."""
-    interior = float(np.median(clean[maxscan:-maxscan, maxscan:-maxscan]))
+    interior = float(np.median(clean[refscan:-refscan, refscan:-refscan]))
     if interior <= 0:
         return (0, 0, 0, 0)
     rm = np.median(clean, axis=1) / interior - 1
@@ -356,6 +356,51 @@ def detect_edge_trim(clean, valid, thr=0.00025, maxscan=300, pad=16):
 
 def stretch(a, valid, lo, hi):
     return np.clip((a - lo) / (hi - lo), 0, 1) * valid
+
+
+def find_starnet(sn_dir):
+    """Locate the StarNet CLI in sn_dir: either the new starnet2 (extracted
+    .deb root or a dir holding starnet2 + libs) or the old starnet++."""
+    for exe, lib in [('usr/bin/starnet2', 'usr/lib/starnet2'),
+                     ('bin/starnet2', 'lib/starnet2'),
+                     ('starnet2', '.')]:
+        e = os.path.join(sn_dir, exe)
+        if os.access(e, os.X_OK) and not os.path.isdir(e):
+            return 'new', e, os.path.join(sn_dir, lib)
+    e = os.path.join(sn_dir, 'starnet++')
+    if os.access(e, os.X_OK):
+        return 'old', e, sn_dir
+    sys.exit(f'--starnet: no starnet2 or starnet++ executable found under {sn_dir}')
+
+
+def run_starnet(img, valid, sn_dir, log):
+    """Remove stars with the StarNet CLI (old starnet++ or new starnet2):
+    invertible asinh stretch to 16-bit TIFF, starnet, inverse stretch.
+    (Linear input gives much worse star removal, so always stretch.)
+    Returns the starless image (float32)."""
+    import subprocess
+    import tempfile
+    import tifffile
+    kind, exe, libdir = find_starnet(sn_dir)
+    med = float(np.median(img[valid]))
+    a = 6 * float(np.median(np.abs(img[valid] - med))) * 1.4826
+    x = np.arcsinh((img - med) / a)
+    lo, hi = float(x.min()), float(np.arcsinh((float(img.max()) - med) / a))
+    u = ((x - lo) / (hi - lo) * 65535).astype(np.uint16)
+    with tempfile.TemporaryDirectory(prefix='synthflat-sn-') as td:
+        fin = os.path.join(td, 'in.tif')
+        fout = os.path.join(td, 'out.tif')
+        tifffile.imwrite(fin, u, photometric='minisblack', compression=None)
+        log(f'  {os.path.basename(exe)} ({kind} CLI) ...')
+        env = dict(os.environ, LD_LIBRARY_PATH=libdir)
+        cmd = [exe, '-i', fin, '-o', fout, '-q'] if kind == 'new' else [exe, fin, fout, '256']
+        r = subprocess.run(cmd, cwd=os.path.dirname(exe) if kind == 'new' else sn_dir,
+                           env=env, capture_output=True, text=True)
+        if r.returncode or not os.path.exists(fout):
+            sys.exit(f'starnet failed:\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}')
+        us = tifffile.imread(fout).astype(np.float64)
+    x = us / 65535 * (hi - lo) + lo
+    return (np.sinh(x) * a + med).astype(np.float32)
 
 
 # ----------------------------------------------------------------------------
@@ -386,33 +431,73 @@ def out_name(path, suffix, ext=None):
     return f'{base}{suffix}{ext or e}'
 
 
-def process_channel(name, img, valid, hdr, a, log):
+def process_channel(name, img, valid, hdr, a, log, starless=None):
     H, W = img.shape
     med0, sig0 = robust_stats(img[valid])
     cell = a.mesh or max(32, int(round(min(H, W) / 45)))
     log(f'  size {W}x{H}, background {med0:.6g}, noise {sig0:.3g}, mesh cell {cell} px')
 
-    mask = source_mask(img, valid, a.mask_sigma, a.mask_grow, a.big_area, a.regions, cell,
-                       a.big_halo)
+    if starless is not None:
+        # stars (and their halos) are gone: model the starless background.
+        # Mask only what deserves protection: components that are compact and
+        # bright (galaxies). Huge faint components are leftover glow the model
+        # SHOULD flatten - unless --nebula says the field holds real nebulosity.
+        src = starless
+        mm, ss = robust_stats(starless[valid])
+        det = (ndimage.gaussian_filter(starless, 3) > mm + 2 * ss) & valid
+        lab, n = ndimage.label(det)
+        mask = ndimage.binary_dilation(det, iterations=10)
+        if n:
+            sm3 = ndimage.gaussian_filter(starless, 3)
+            for i, sl_ in enumerate(ndimage.find_objects(lab)):
+                if sl_ is None:
+                    continue
+                comp = lab[sl_] == i + 1
+                area = int(comp.sum())
+                sb = float(np.median(sm3[sl_][comp])) - mm     # surface brightness above bg
+                compact_bright = sb > 6 * ss or area < 4 * cell * cell
+                if not (compact_bright or a.nebula):
+                    continue                                   # leftover glow: flatten it
+                r = int(min(0.5 * np.sqrt(area / np.pi) + 30, 150))
+                y0 = max(sl_[0].start - r - 2, 0)
+                y1 = min(sl_[0].stop + r + 2, H)
+                x0 = max(sl_[1].start - r - 2, 0)
+                x1 = min(sl_[1].stop + r + 2, W)
+                sub = lab[y0:y1, x0:x1] == i + 1
+                mask[y0:y1, x0:x1] |= ndimage.distance_transform_edt(~sub) <= r
+        mask |= ~valid
+        for (cx, cy, r) in a.regions:
+            yy, xx = np.ogrid[:H, :W]
+            mask |= (xx - cx) ** 2 + (yy - cy) ** 2 <= r * r
+    else:
+        src = img
+        mask = source_mask(img, valid, a.mask_sigma, a.mask_grow, a.big_area, a.regions, cell,
+                           a.big_halo)
     good = ~mask
     log(f'  masked {mask.mean():.1%} of pixels ({(~valid).mean():.1%} invalid border)')
 
-    # --- additive gradient
+    # --- additive gradient (fitted on the model source: starless if available)
     if a.grad_order >= 0:
-        grad = fit_poly2d(img, good, a.grad_order)
+        grad = fit_poly2d(src, good, a.grad_order)
         grad -= float(grad[valid].mean())          # keep the overall level
         g_pp = float(grad[valid].max() - grad[valid].min())
         log(f'  gradient order {a.grad_order}: peak-to-peak {g_pp:.4g} = {g_pp / med0:.2%} of background')
         step1 = img - grad
+        step1_src = src - grad
     else:
         grad = np.zeros_like(img)
         step1 = img
+        step1_src = src
 
     # --- multiplicative flat
-    model, holes, (gh, gw) = mesh_background(step1, good, cell, fill=a.fill, center=a.center)
+    # with a starless model source the surroundings of masked objects carry the
+    # true local background (hole, rings) right up to the mask edge - local
+    # interpolation beats the radial ring-average there
+    fill_mode = 'nearest' if starless is not None else a.fill
+    model, holes, (gh, gw) = mesh_background(step1_src, good, cell, fill=fill_mode, center=a.center)
     if a.radial:
         with np.errstate(divide='ignore', invalid='ignore'):
-            ratio = np.where(model > 0, step1 / model, 1.0)
+            ratio = np.where(model > 0, step1_src / model, 1.0)
         rad, center = radial_model(ratio, good, a.center)
         model = model * rad
         log(f'  radial rings: {rad[valid].min():.4f} .. {rad[valid].max():.4f} '
@@ -422,15 +507,36 @@ def process_channel(name, img, valid, hdr, a, log):
         f'  (peak-to-peak {flat[valid].max() - flat[valid].min():.2%})')
 
     clean = np.where(valid, step1 / flat, 0).astype(np.float32)
+    if starless is not None and a.subtract_halos:
+        # smooth glow of star reflection halos: greyscale OPENING of the star
+        # layer (img - starless). An opening is pointwise <= the data, so it
+        # can never over-subtract (no dark rings between close pairs); it
+        # removes structures smaller than the window (star cores) and follows
+        # the halo envelope from below. 4x downsample for speed. The layer is
+        # zeroed under the object mask: what StarNet nibbles off galaxy
+        # outskirts must not be subtracted as "halo".
+        layer = np.where(valid & ~mask, img - starless, 0)
+        ds = 4
+        Hd, Wd = (H // ds) * ds, (W // ds) * ds
+        small = layer[:Hd, :Wd].reshape(Hd // ds, ds, Wd // ds, ds).mean(axis=(1, 3))
+        gsm = ndimage.gaussian_filter(ndimage.grey_opening(small, size=13), 1.5)
+        glow = np.clip(ndimage.zoom(gsm, (H / gsm.shape[0], W / gsm.shape[1]), order=1), 0, None)
+        glow = glow[:H, :W].astype(np.float32)
+        log(f'  halo glow subtracted: up to {glow[valid].max() / med0:.2%} of background')
+        clean = np.where(valid, clean - glow, 0).astype(np.float32)
+    # background-only version for diagnostics/edge-trim: with --starnet the
+    # clean image legitimately keeps star halos, which must not be mistaken
+    # for background residuals
+    clean_bg = np.where(valid, step1_src / flat, 0).astype(np.float32)
 
     # --- how flat is it now? large-scale structure before/after (masked mesh)
-    resid_before, _, _ = mesh_background(img, good, cell)
-    resid_after, _, _ = mesh_background(clean, good, cell)
+    resid_before, _, _ = mesh_background(src, good, cell)
+    resid_after, _, _ = mesh_background(clean_bg, good, cell)
     pp_b = resid_before[valid].max() - resid_before[valid].min()
     pp_a = resid_after[valid].max() - resid_after[valid].min()
     log(f'  large-scale background peak-to-peak: before {pp_b / med0:.2%}  after {pp_a / med0:.2%}')
 
-    results = dict(clean=clean, flat=flat.astype(np.float32), grad=grad, mask=mask,
+    results = dict(clean=clean, clean_bg=clean_bg, flat=flat.astype(np.float32), grad=grad, mask=mask,
                    resid_before=resid_before, resid_after=resid_after, med=med0, sig=sig0, cell=cell)
     return results
 
@@ -525,6 +631,16 @@ def main():
     g = ap.add_argument_group('output')
     g.add_argument('--write', action='store_true',
                    help='write <name>-clean.fits and <name>-synthflat.fits next to the inputs')
+    g.add_argument('--nebula', action='store_true',
+                   help='with --starnet: protect ALL structure StarNet leaves (real nebulosity) '
+                        'instead of flattening huge faint leftovers (galaxy-field default)')
+    g.add_argument('--no-subtract-halos', dest='subtract_halos', action='store_false',
+                   help='with --starnet: keep star reflection-halo glow in the image instead of '
+                        'subtracting its smooth component')
+    g.add_argument('--starnet', metavar='DIR',
+                   help='remove stars with the StarNet++ CLI in DIR before modelling the '
+                        'background (best halo handling: star halos stay in the image, the '
+                        'model never follows them). Writes/reuses <name>-starless.fits')
     g.add_argument('--plot', action='store_true', help='write <name>-synthflat.png diagnostics')
     g.add_argument('--out-dir', metavar='DIR', help='put outputs here instead of next to the inputs')
     a = ap.parse_args()
@@ -588,18 +704,40 @@ def main():
                 h['CRPIX2'] = h['CRPIX2'] - y0
         history.append(f'cropped to x {x0}..{x1}, y {y0}..{y1} (common valid area of {len(files)} channels)')
 
-    def run_all(imgs, valids):
-        out = []
+    if a.starnet:
+        sn_dir = os.path.abspath(a.starnet)
+        starlesses = []
         for f, img, valid in zip(files, imgs, valids):
+            cache = out_name(f, '-starless')
+            if os.path.exists(cache) and os.path.getmtime(cache) > os.path.getmtime(f):
+                d, _ = load(cache)
+                if d.shape == img.shape:
+                    log(f'{os.path.basename(f)}: cached starless')
+                    starlesses.append(d)
+                    continue
+            log(f'{os.path.basename(f)}:')
+            sl = run_starnet(img, valid, sn_dir, log)
+            starlesses.append(sl)
+            write_fits(cache, sl, hdrs[files.index(f)], ['starnet starless (synth-flat intermediate)'])
+    else:
+        starlesses = [None] * len(files)
+
+    def run_all(imgs, valids, starlesses):
+        out = []
+        for f, img, valid, sl in zip(files, imgs, valids, starlesses):
             name = os.path.splitext(os.path.basename(f))[0]
             log(f'{name}:')
-            out.append(process_channel(name, img, valid, hdrs[files.index(f)], a, log))
+            out.append(process_channel(name, img, valid, hdrs[files.index(f)], a, log, sl))
         return out
 
-    results = run_all(imgs, valids)
+    results = run_all(imgs, valids, starlesses)
 
     for _pass in range(3 if a.edge_trim != 0 else 0):
-        trims = [detect_edge_trim(r['clean'], v) for r, v in zip(results, valids)]
+        # pass 0 removes the stack's coverage bands (up to 300 px); later passes
+        # only clean up narrow leftovers - a steep real background slope would
+        # otherwise re-trigger at every new edge and eat the image
+        cap = 300 if _pass == 0 else 60
+        trims = [detect_edge_trim(r['clean_bg'], v, maxscan=cap) for r, v in zip(results, valids)]
         t, b, l, rr = (max(x) for x in zip(*trims))
         if a.edge_trim > 0:
             if _pass:
@@ -611,13 +749,14 @@ def main():
             H, W = imgs[0].shape
             imgs = [d[t:H - b, l:W - rr] for d in imgs]
             valids = [v[t:H - b, l:W - rr] for v in valids]
+            starlesses = [sl[t:H - b, l:W - rr] if sl is not None else None for sl in starlesses]
             for h in hdrs:
                 if 'CRPIX1' in h:
                     h['CRPIX1'] = h['CRPIX1'] - l
                     h['CRPIX2'] = h['CRPIX2'] - t
             history.append(f'edge-trimmed top {t}, bottom {b}, left {l}, right {rr} px '
                            f'(stack coverage bands)')
-            results = run_all(imgs, valids)
+            results = run_all(imgs, valids, starlesses)
         else:
             break
 
