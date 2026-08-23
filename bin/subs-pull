@@ -44,6 +44,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import tempfile
 from datetime import date, timedelta
 
@@ -53,6 +54,7 @@ FITS_EXT = ('.fits', '.fit', '.fts')
 ASIDE_NAMES = ('bad', 'rejected')
 DATE_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})T')
 RSYNC_BASE = ['rsync', '-a', '-x', '--progress']
+SORT_SUBS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sort-subs')
 
 
 def is_aside(rel_dir):
@@ -62,6 +64,47 @@ def is_aside(rel_dir):
         if p.lower() in ASIDE_NAMES or p.endswith('_rejected'):
             return True
     return False
+
+
+def newest_frame_age(obj):
+    """Age in minutes of the most recently written frame under obj/Light, or None."""
+    newest = 0.0
+    for root, dirs, files in os.walk(os.path.join(obj, 'Light')):
+        for f in files:
+            if f.lower().endswith(FITS_EXT):
+                newest = max(newest, os.path.getmtime(os.path.join(root, f)))
+    return (time.time() - newest) / 60 if newest else None
+
+
+def sort_object(dest, a, pull_applied):
+    """Run sort-subs on the object that was just pulled into, if it is managed."""
+    obj = dest.rstrip('/')
+    if not (os.path.isdir(os.path.join(obj, 'Light')) or os.path.basename(obj) == 'Light'):
+        print('  sort-subs skipped: not an object directory')
+        return 0
+    if not (os.path.exists(os.path.join(obj, 'sub-metrics.csv'))
+            or os.path.isdir(os.path.join(obj, 'Light_rejected'))):
+        print('  sort-subs skipped: this object is not sorted yet '
+              '(no sub-metrics.csv, no Light_rejected/) - run sort-subs on it once by hand')
+        return 0
+    do_apply = a.sort_apply
+    if do_apply and not pull_applied:
+        print('  sort-subs: measure and report only (the pull itself is a dry run)')
+        do_apply = False
+    if do_apply:
+        age = newest_frame_age(obj)
+        if age is not None and age < a.settle:
+            print(f'  sort-subs: measure and report only - newest frame is {age:.0f} min old, '
+                  f'less than --settle {a.settle} min (acquisition may still be running)')
+            do_apply = False
+    cmd = [SORT_SUBS, obj]
+    if do_apply:
+        cmd.append('--apply')
+        if a.sort_sync:
+            cmd.append('--sync')
+    cmd += a.sort_arg
+    print(f'  running: {" ".join(cmd)}')
+    return subprocess.run(cmd).returncode
 
 
 def scan_dest(dest):
@@ -143,6 +186,24 @@ def main():
     ap.add_argument('--src', metavar='HOST:DIR', help='explicit source (use with --dest)')
     ap.add_argument('--dest', metavar='DIR', help='explicit destination (use with --src)')
     ap.add_argument('-v', '--verbose', action='store_true', help='list the transferred files')
+    ap.add_argument('--sort', action='store_true',
+                    help='after the transfer run sort-subs on the object: measure the new frames '
+                         'into <object>/sub-metrics.csv and report. Only for objects that are '
+                         'already sorted (sub-metrics.csv or Light_rejected/ present)')
+    ap.add_argument('--sort-apply', action='store_true',
+                    help='... and let sort-subs move rejected frames to Light_rejected/ '
+                         '(implies --sort)')
+    ap.add_argument('--sort-sync', action='store_true',
+                    help='... and pass --sync, so frames the fuller night now considers good are '
+                         'moved back into Light/ (implies --sort-apply; note it also overrules '
+                         'frames you moved into bad/ by hand)')
+    ap.add_argument('--sort-arg', action='append', default=[], metavar='OPT',
+                    help='extra sort-subs option, repeatable, e.g. --sort-arg --star-frac '
+                         '--sort-arg 0.4')
+    ap.add_argument('--settle', type=int, default=60, metavar='MINUTES',
+                    help='with --sort-apply: do not move anything while the newest frame is '
+                         'younger than this, because the night is then only partly acquired and '
+                         'the per-night statistics are still incomplete (default 60, 0 disables)')
     ap.add_argument('--no-exclude-aside', action='store_true',
                     help='do not exclude frames that are set aside locally (they come back)')
     ap.add_argument('--rsync-arg', action='append', default=[], metavar='OPT',
@@ -154,7 +215,12 @@ def main():
     if '--' in argv:
         i = argv.index('--')
         argv, extra = argv[:i], argv[i + 1:]
+    sys.stdout.reconfigure(line_buffering=True)   # keep our output in step with rsync/sort-subs
     a = ap.parse_args(argv)
+    if a.sort_sync:
+        a.sort_apply = True
+    if a.sort_apply:
+        a.sort = True
 
     extra = a.rsync_arg + extra
     for x in extra + a.targets:
@@ -209,6 +275,8 @@ def main():
                 rc = r.returncode or rc
         if tmp:
             os.unlink(tmp.name)
+        if a.sort:
+            rc = sort_object(dest, a, a.apply) or rc
 
     if not a.apply:
         print('\n(dry run - use --apply to transfer)')

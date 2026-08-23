@@ -333,14 +333,28 @@ def collect(light_dir, parent, cache_path, recompute=False):
             todo.append((f, rel, st))
     if todo:
         print(f'measuring {len(todo)} frames ({len(rows)} cached) ...', file=sys.stderr)
+        skipped = set()
         for i, (f, rel, st) in enumerate(todo, 1):
-            m = measure(f)
+            try:
+                m = measure(f)
+            except Exception as e:
+                # could not be measured - do not cache it, so it is tried again
+                # on the next run (whatever the cause: the file may be corrupt,
+                # incomplete, or have a layout this tool does not handle)
+                print(f'  SKIP {rel}: cannot measure: {type(e).__name__}: {str(e)[:120]}',
+                      file=sys.stderr)
+                skipped.add(rel)
+                continue
             m.update(relpath=rel, mtime=int(st.st_mtime), size=st.st_size, mver=METRIC_VERSION)
             rows[rel] = m
             if i % 50 == 0 or i == len(todo):
                 print(f'  {i}/{len(todo)}', file=sys.stderr)
                 save_cache(cache_path, rows)
         save_cache(cache_path, rows)
+        if skipped:
+            print(f'  skipped {len(skipped)} frame(s) that could not be measured',
+                  file=sys.stderr)
+            found = [x for x in found if x[1] not in skipped]
     # location/home derive from the current path and are never cached
     for f, rel, loc, home in found:
         rows[rel].update(location=loc, home=home)
