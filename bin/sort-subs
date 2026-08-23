@@ -534,7 +534,7 @@ def integration_totals(light_dir, parent, cache_path):
         cell = per[filt][loc]
         cell[0] += 1
         cell[1] += exp
-    print(f"{'filter':<10} {'in Light':>9} {'time':>8}   {'set aside':>9} {'time':>8}   "
+    print(f"{'filter':<10} {'Lights':>9} {'time':>8}   {'Rejected':>9} {'time':>8}   "
           f"{'total':>9} {'time':>8}")
     tot = {'main': [0, 0.0], 'aside': [0, 0.0]}
     for filt in sorted(per, key=filter_key):
@@ -591,7 +591,7 @@ def report(groups, show):
     sums = defaultdict(lambda: [0, 0.0])         # border / reject / aside, and move/back
     print(f"{'night':<10} {'filt':<5} {'n':>4} {'keep':>4} {'bord':>4} {'rej':>4} "
           f"{'bg/s':>7} {'stars':>5} {'kept':>7}  {'fwhm(keep)':>10}"
-          + (f"  {'aside':>5} {'move aside':>10} {'bring back':>10}" if any_aside else ''))
+          + (f"  {'inRej':>6} {'toRej':>6} {'toLights':>8}" if any_aside else ''))
     for (night, filt) in sorted(groups, key=lambda k: (k[0], filter_key(k[1]))):
         g = groups[(night, filt)]
         keep = [r for r in g if r['verdict'] == 'keep']
@@ -609,7 +609,7 @@ def report(groups, show):
             aside = [r for r in g if r['location'] == 'aside']
             move = [r for r in g if disagreement(r) == 'move-aside']
             back = [r for r in g if disagreement(r) == 'bring-back']
-            line += f"  {len(aside):>5} {len(move):>10} {len(back):>10}"
+            line += f"  {len(aside):>6} {len(move):>6} {len(back):>8}"
             for k, rows in (('aside', aside), ('move', move), ('back', back)):
                 sums[k][0] += len(rows)
                 sums[k][1] += secs(rows)
@@ -628,14 +628,15 @@ def report(groups, show):
     print(f"Borderline: {sums['bord'][0]}/{hm(sums['bord'][1] / 3600)}"
           f"   (kept as well - blink these by eye)")
     print(f"Rejected:   {sums['rej'][0]}/{hm(sums['rej'][1] / 3600)}"
-          f"   -> Light/ would hold {kept_n + sums['bord'][0]}/"
+          f"   -> Lights would hold {kept_n + sums['bord'][0]}/"
           f"{hm((kept_s + sums['bord'][1]) / 3600)}")
     if any_aside:
-        print(f"Set aside on disk already: {sums['aside'][0]}/{hm(sums['aside'][1] / 3600)}"
-              f"   (everything found in Light_rejected/ and bad/)")
-        print(f"To move aside: {sums['move'][0]}/{hm(sums['move'][1] / 3600)} (--apply)"
-              f"   To bring back into Light/: {sums['back'][0]}/{hm(sums['back'][1] / 3600)}"
-              f" (--apply --sync; list them with --show diff)")
+        if not (sums['move'][0] or sums['back'][0]):
+            print('Nothing to move: the Lights and Rejected trees already match these verdicts.')
+        else:
+            print(f"To move to Rejected: {sums['move'][0]}/{hm(sums['move'][1] / 3600)} (--apply)"
+                  f"   to bring back into Lights: {sums['back'][0]}/{hm(sums['back'][1] / 3600)}"
+                  f" (--apply --sync)   list them with --show diff")
 
     if show:
         print()
@@ -751,7 +752,7 @@ def plot_nights(groups, out_dir):
     for night in nights:
         fig, axes = plt.subplots(4, 1, figsize=(12, 11), sharex=True)
         ax_bg, ax_st, ax_fw, ax_ec = axes
-        for (n, filt), g in sorted(groups.items()):
+        for (n, filt), g in sorted(groups.items(), key=lambda kv: (kv[0][0], filter_key(kv[0][1]))):
             if n != night:
                 continue
             col = FILTER_COLORS.get(filt, None)
@@ -782,7 +783,7 @@ def plot_nights(groups, out_dir):
             idx = [i for i, r in enumerate(g) if r['location'] == 'aside']
             if idx:
                 ax_st.plot([t[i] for i in idx], [stars[i] for i in idx], marker='+', ls='none',
-                           ms=9, color='black', mew=1.2, label='set aside (manual/previous run)')
+                           ms=9, color='black', mew=1.2, label='rejected on disk (manual/previous run)')
             base = g[0]['baseline']
             if not np.isnan(base):
                 exp = np.median([fnum(r['exptime']) for r in g])
