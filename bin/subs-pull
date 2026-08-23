@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""subs-pull - fetch new sub exposures from the acquisition machine.
+
+Pulls frames from the acquisition host (vostro) into the local archive
+(~/astro/data) without dragging back frames that were already fetched AND
+afterwards set aside - by sort-subs into <object>/Light_rejected/<Filter>/, or
+by hand into <object>/Light/<Filter>/bad/. Plain rsync re-copies those forever,
+because at their original path they are simply "missing" on this side.
+
+HOW IT DECIDES WHAT IS NEW
+  Every FITS file under the destination counts as "already have it", including
+  the ones in aside locations. The frames sitting aside are turned into rsync
+  exclude patterns (matched on file name, so it does not matter that the file
+  now lives in Light_rejected/ instead of Light/). Everything else rsync sorts
+  out by itself: files that are already in place with the same size and time
+  are skipped, genuinely new ones are transferred.
+  With --days / --since an extra include window on the date in the file name
+  is applied, which only makes the transfer list shorter (and rsync faster) -
+  it is not what keeps the rejected frames away.
+
+Running it repeatedly during an imaging session is fine: a frame that was still
+being written comes over short, and the next run replaces it (size and time
+differ from the source). Only pitfall: do not sort such a partial frame aside
+with sort-subs before the next pull, or the exclusion would keep the short copy.
+
+SAFETY
+  This is a one-way pull. It never deletes anything, here or there, and it
+  refuses --delete: the acquisition host is a scratch area that gets cleaned
+  out on purpose (files are kept there while a target is being imaged so that
+  KStars keeps counting), while the local tree is the archive. Propagating
+  deletions in this direction would erase the archive.
+
+EXAMPLES
+  subs-pull                          # vostro:APM/ -> ~/astro/data/, everything new
+  subs-pull -n                       # dry run: show what would come over
+  subs-pull NGC_6285                 # only that target
+  subs-pull NGC_6285 NGC_6043 --days 3
+  subs-pull --src vostro:APM/NGC_6285/Light/Lum/ --dest ~/astro/data/NGC_6285/Light/Lum/
+  subs-pull NGC_6285 --days 3 -- --bwlimit=20M     # extra rsync options after --
+"""
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from datetime import date, timedelta
+
+SRC_ROOT = 'vostro:APM'
+DEST_ROOT = os.path.expanduser('~/astro/data')
+FITS_EXT = ('.fits', '.fit', '.fts')
+ASIDE_NAMES = ('bad', 'rejected')
+DATE_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})T')
+RSYNC_BASE = ['rsync', '-a', '-x', '--progress']
+
+
+def is_aside(rel_dir):
+    """True if this path (relative to the destination root) is an aside location:
+    a <name>_rejected tree (sort-subs) or a bad/ or rejected/ subdir (by hand)."""
+    for p in rel_dir.split(os.sep):
+        if p.lower() in ASIDE_NAMES or p.endswith('_rejected'):
+            return True
+    return False
+
+
+def scan_dest(dest):
+    """Return (total_frames, aside_basenames) for everything under dest."""
+    total = 0
+    aside = set()
+    for root, dirs, files in os.walk(dest):
+        rel = os.path.relpath(root, dest)
+        names = [f for f in files if f.lower().endswith(FITS_EXT)]
+        if not names:
+            continue
+        total += len(names)
+        if rel != '.' and is_aside(rel):
+            aside.update(names)
+    return total, aside
+
+
+def quote_pattern(name):
+    """Escape rsync wildcard characters so a file name matches literally."""
+    return re.sub(r'([*?\[\\])', r'\\\1', name)
+
+
+def date_window(days, since):
+    """List of YYYY-MM-DD strings to include, or None for 'no window'."""
+    if not days and not since:
+        return None
+    today = date.today()
+    start = date.fromisoformat(since) if since else today - timedelta(days=days - 1)
+    if start > today:
+        return []
+    return [(start + timedelta(days=i)).isoformat()
+            for i in range((today - start).days + 1)]
+
+
+def build_pairs(a):
+    if a.src or a.dest:
+        if a.targets:
+            sys.exit('give either target names or --src/--dest, not both')
+        if not (a.src and a.dest):
+            sys.exit('--src and --dest must be given together')
+        return [(a.src.rstrip('/') + '/', os.path.expanduser(a.dest).rstrip('/') + '/')]
+    if a.targets:
+        return [(f'{a.src_root.rstrip("/")}/{t.strip("/")}/',
+                 os.path.join(a.dest_root, t.strip('/')) + '/') for t in a.targets]
+    return [(a.src_root.rstrip('/') + '/', a.dest_root.rstrip('/') + '/')]
+
+
+def run(cmd, capture):
+    if capture:
+        return subprocess.run(cmd, capture_output=True, text=True)
+    return subprocess.run(cmd, text=True)
+
+
+def stat_line(out, key):
+    for line in out.splitlines():
+        if line.startswith(key):
+            return line.split(':', 1)[1].strip()
+    return '?'
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('targets', nargs='*',
+                    help='object directories under the source root (default: the whole tree)')
+    ap.add_argument('--apply', action='store_true',
+                    help='actually transfer (default: dry run, nothing is written)')
+    ap.add_argument('-n', '--dry-run', action='store_true',
+                    help='accepted for habit; dry run is the default anyway')
+    ap.add_argument('--days', type=int, metavar='N',
+                    help='only consider frames whose file name date is within the last N days '
+                         '(today = 1). Speeds up big trees; the aside exclusions work regardless')
+    ap.add_argument('--since', metavar='YYYY-MM-DD',
+                    help='only consider frames from this date onward')
+    ap.add_argument('--src-root', default=SRC_ROOT, metavar='HOST:DIR',
+                    help=f'source root for target names (default {SRC_ROOT})')
+    ap.add_argument('--dest-root', default=DEST_ROOT, metavar='DIR',
+                    help=f'destination root for target names (default {DEST_ROOT})')
+    ap.add_argument('--src', metavar='HOST:DIR', help='explicit source (use with --dest)')
+    ap.add_argument('--dest', metavar='DIR', help='explicit destination (use with --src)')
+    ap.add_argument('-v', '--verbose', action='store_true', help='list the transferred files')
+    ap.add_argument('--no-exclude-aside', action='store_true',
+                    help='do not exclude frames that are set aside locally (they come back)')
+    ap.add_argument('--rsync-arg', action='append', default=[], metavar='OPT',
+                    help='extra rsync option (repeatable); options after a literal -- work too')
+    # split off everything after a standalone '--' before argparse sees it, so
+    # that our own options keep working in front of it
+    argv = sys.argv[1:]
+    extra = []
+    if '--' in argv:
+        i = argv.index('--')
+        argv, extra = argv[:i], argv[i + 1:]
+    a = ap.parse_args(argv)
+
+    extra = a.rsync_arg + extra
+    for x in extra + a.targets:
+        if x.startswith('--delete'):
+            sys.exit('subs-pull never deletes: the source is a scratch area that gets cleaned '
+                     'out, the local tree is the archive.')
+
+    window = date_window(a.days, a.since)
+    if window is not None:
+        print(f'date window: {window[0]} .. {window[-1]}' if window else 'date window: empty')
+
+    rc = 0
+    for src, dest in build_pairs(a):
+        print(f'\n{src} -> {dest}')
+        if os.path.isdir(dest):
+            total, aside = scan_dest(dest)
+            print(f'  already local: {total} frames ({len(aside)} set aside)')
+        else:
+            total, aside = 0, set()
+            print('  new target (destination does not exist yet)')
+
+        filters = []
+        tmp = None
+        if aside and not a.no_exclude_aside:
+            tmp = tempfile.NamedTemporaryFile('w', prefix='subs-pull-', suffix='.excl',
+                                              delete=False)
+            tmp.write('\n'.join(quote_pattern(n) for n in sorted(aside)) + '\n')
+            tmp.close()
+            filters.append(f'--exclude-from={tmp.name}')
+        if window is not None:
+            filters.append('--include=*/')
+            filters += [f'--include={d}T*' for d in window]
+            filters.append('--exclude=*')
+
+        cmd = RSYNC_BASE + filters + extra + [src, dest]
+        if a.verbose:
+            cmd.insert(1, '-v')
+
+        plan = run(cmd + ['-n', '--stats'], capture=True)
+        if plan.returncode:
+            print(plan.stdout[-2000:] + plan.stderr[-2000:], file=sys.stderr)
+            rc = plan.returncode
+        else:
+            n = stat_line(plan.stdout, 'Number of regular files transferred')
+            size = stat_line(plan.stdout, 'Total transferred file size')
+            print(f'  to transfer: {n} frames, {size}')
+            if not a.apply:
+                if a.verbose:
+                    print(plan.stdout)
+            elif n not in ('0', '?'):
+                r = run(cmd, capture=False)
+                rc = r.returncode or rc
+        if tmp:
+            os.unlink(tmp.name)
+
+    if not a.apply:
+        print('\n(dry run - use --apply to transfer)')
+    sys.exit(rc)
+
+
+if __name__ == '__main__':
+    main()
