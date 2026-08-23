@@ -70,10 +70,14 @@ DECISION (per frame; "x typical" = stars / typical, "x baseline" = bg rate / bas
 COMPARING WITH YOUR OWN SORTING
   Frames already set aside - in <object>/Light_rejected/<Filter>/ (this tool)
   or in hand-made Light/<Filter>/bad/ (or rejected/) dirs - are measured too
-  and shown as "aside". The report then counts disagreements:
-    S-rej/M-keep  script would reject a frame that is still in the main tree
-    S-keep/M-rej  script would keep a frame that was set aside
-  --show diff lists them with reasons, --write puts them in diff.tsv.
+  and shown as "aside". The report then counts the frames that are not where
+  this run says they belong - which is exactly what --apply would do:
+    move aside   a frame still in Light/ that this run rejects; --apply moves
+                 it to Light_rejected/<Filter>/
+    bring back   a frame in Light_rejected/ or in your hand-made bad/ that this
+                 run keeps; only --apply --sync moves it home again
+  So to see what --sync would do before running it: look at the "bring back"
+  count and list those frames with --show diff (or --write, diff.tsv).
 
 MOVING (never deletes)
   Nothing moves unless --apply is given. Rejects go to
@@ -533,7 +537,7 @@ def integration_totals(light_dir, parent, cache_path):
     print(f"{'filter':<10} {'in Light':>9} {'time':>8}   {'set aside':>9} {'time':>8}   "
           f"{'total':>9} {'time':>8}")
     tot = {'main': [0, 0.0], 'aside': [0, 0.0]}
-    for filt in sorted(per):
+    for filt in sorted(per, key=filter_key):
         m_, a_ = per[filt]['main'], per[filt]['aside']
         print(f'{filt:<10} {m_[0]:>9} {hm(m_[1] / 3600):>8}   {a_[0]:>9} {hm(a_[1] / 3600):>8}   '
               f'{m_[0] + a_[0]:>9} {hm((m_[1] + a_[1]) / 3600):>8}')
@@ -554,6 +558,23 @@ def hm(hours):
     return f'{m // 60}h{m % 60:02d}m'
 
 
+FILTER_ORDER = ('Lum', 'Red', 'Green', 'Blue', 'Ha', 'OIII', 'SII')
+FILTER_ALIAS = {'l': 'Lum', 'lum': 'Lum', 'luminance': 'Lum', 'clear': 'Lum',
+                'r': 'Red', 'red': 'Red', 'g': 'Green', 'green': 'Green',
+                'b': 'Blue', 'blue': 'Blue',
+                'ha': 'Ha', 'halpha': 'Ha', 'h-alpha': 'Ha', 'hα': 'Ha',
+                'oiii': 'OIII', 'o3': 'OIII', 'sii': 'SII', 's2': 'SII'}
+
+
+def filter_key(name):
+    """Sort key that puts filters in the order they are used (Lum, Red, Green,
+    Blue, Ha, OIII, SII); anything unrecognised follows alphabetically."""
+    canon = FILTER_ALIAS.get(str(name).strip().lower().replace('_', ''))
+    if canon:
+        return (FILTER_ORDER.index(canon), '')
+    return (len(FILTER_ORDER), str(name).lower())
+
+
 def fmt_row(r):
     alt = f"{float(r['objctalt']):5.1f}" if r['objctalt'] not in ('', None) else '  n/a'
     ratio = f"{r['ratio']:5.2f}" if not np.isnan(r['ratio']) else '  n/a'
@@ -565,17 +586,18 @@ def fmt_row(r):
 
 
 def report(groups, show):
-    tot = defaultdict(float)
     any_aside = any(r['location'] == 'aside' for g in groups.values() for r in g)
+    per = defaultdict(lambda: [0, 0.0])          # kept frames + seconds per filter
+    sums = defaultdict(lambda: [0, 0.0])         # border / reject / aside, and move/back
     print(f"{'night':<10} {'filt':<5} {'n':>4} {'keep':>4} {'bord':>4} {'rej':>4} "
           f"{'bg/s':>7} {'stars':>5} {'kept':>7}  {'fwhm(keep)':>10}"
-          + (f"  {'aside':>5} {'S-rej/M-keep':>12} {'S-keep/M-rej':>12}" if any_aside else ''))
-    for (night, filt) in sorted(groups):
+          + (f"  {'aside':>5} {'move aside':>10} {'bring back':>10}" if any_aside else ''))
+    for (night, filt) in sorted(groups, key=lambda k: (k[0], filter_key(k[1]))):
         g = groups[(night, filt)]
         keep = [r for r in g if r['verdict'] == 'keep']
         bord = [r for r in g if r['verdict'] == 'border']
         rej = [r for r in g if r['verdict'] == 'reject']
-        keep_h = sum(float(r['exptime'] or 0) for r in keep) / 3600
+        keep_h = secs(keep) / 3600
         fw = [f for f in (fnum(r['fwhm']) for r in keep) if not np.isnan(f)]
         fwtxt = f"{np.median(fw):.2f}" if fw else 'n/a'
         base, typ = g[0]['baseline'], g[0]['typical']
@@ -585,25 +607,35 @@ def report(groups, show):
                 f"{basetxt} {typtxt} {hm(keep_h):>7}  {fwtxt:>10}")
         if any_aside:
             aside = [r for r in g if r['location'] == 'aside']
-            srej_mkeep = [r for r in g if r['verdict'] == 'reject' and r['location'] == 'main']
-            skeep_mrej = [r for r in g if r['verdict'] != 'reject' and r['location'] == 'aside']
-            line += f"  {len(aside):>5} {len(srej_mkeep):>12} {len(skeep_mrej):>12}"
-            tot['_srej_mkeep'] += len(srej_mkeep)
-            tot['_skeep_mrej'] += len(skeep_mrej)
-            tot['_aside'] += len(aside)
-            tot['_aside_h'] += sum(fnum(r['exptime']) for r in aside) / 3600
+            move = [r for r in g if disagreement(r) == 'move-aside']
+            back = [r for r in g if disagreement(r) == 'bring-back']
+            line += f"  {len(aside):>5} {len(move):>10} {len(back):>10}"
+            for k, rows in (('aside', aside), ('move', move), ('back', back)):
+                sums[k][0] += len(rows)
+                sums[k][1] += secs(rows)
         print(line)
-        tot[filt] += keep_h
-        tot['_rej'] += len(rej)
-        tot['_bord'] += len(bord)
+        per[filt][0] += len(keep)
+        per[filt][1] += secs(keep)
+        for k, rows in (('bord', bord), ('rej', rej)):
+            sums[k][0] += len(rows)
+            sums[k][1] += secs(rows)
+    kept_n = sum(v[0] for v in per.values())
+    kept_s = sum(v[1] for v in per.values())
     print()
-    print('kept integration per filter: ' +
-          ', '.join(f"{f}={hm(h)}" for f, h in sorted(tot.items()) if not f.startswith('_')))
-    print(f"rejected: {int(tot['_rej'])}   borderline (blink these): {int(tot['_bord'])}")
+    print('Kept:       ' + ', '.join(f'{f}={per[f][0]}/{hm(per[f][1] / 3600)}'
+                                     for f in sorted(per, key=filter_key))
+          + f', TOTAL={kept_n}/{hm(kept_s / 3600)}')
+    print(f"Borderline: {sums['bord'][0]}/{hm(sums['bord'][1] / 3600)}"
+          f"   (kept as well - blink these by eye)")
+    print(f"Rejected:   {sums['rej'][0]}/{hm(sums['rej'][1] / 3600)}"
+          f"   -> Light/ would hold {kept_n + sums['bord'][0]}/"
+          f"{hm((kept_s + sums['bord'][1]) / 3600)}")
     if any_aside:
-        print(f"set aside on disk: {int(tot['_aside'])} = {hm(tot['_aside_h'])}   "
-              f"script rejects but manually kept (S-rej/M-keep): {int(tot['_srej_mkeep'])}   "
-              f"script keeps but manually rejected (S-keep/M-rej): {int(tot['_skeep_mrej'])}")
+        print(f"Set aside on disk already: {sums['aside'][0]}/{hm(sums['aside'][1] / 3600)}"
+              f"   (everything found in Light_rejected/ and bad/)")
+        print(f"To move aside: {sums['move'][0]}/{hm(sums['move'][1] / 3600)} (--apply)"
+              f"   To bring back into Light/: {sums['back'][0]}/{hm(sums['back'][1] / 3600)}"
+              f" (--apply --sync; list them with --show diff)")
 
     if show:
         print()
@@ -613,12 +645,21 @@ def report(groups, show):
                     print(fmt_row(r))
 
 
+def secs(rows):
+    """Total exposure time of these frames, in seconds."""
+    return sum(fnum(r['exptime']) if not np.isnan(fnum(r['exptime'])) else 0.0 for r in rows)
+
+
 def disagreement(r):
-    """'S-rej/M-keep', 'S-keep/M-rej' or '' for a frame."""
+    """Where the frame is versus where this run says it belongs:
+    'move-aside'  a frame still in Light/ that the script rejects  (--apply moves it out)
+    'bring-back'  a frame in Light_rejected/ or bad/ that the script keeps
+                  (--apply --sync moves it home)
+    '' when the frame is already where the script wants it."""
     if r['verdict'] == 'reject' and r['location'] == 'main':
-        return 'S-rej/M-keep'
+        return 'move-aside'
     if r['verdict'] != 'reject' and r['location'] == 'aside':
-        return 'S-keep/M-rej'
+        return 'bring-back'
     return ''
 
 
@@ -795,12 +836,12 @@ def apply_moves(parent, light_dir, groups, dest_root, sync):
         for key in sorted(groups):
             for r in groups[key]:
                 d = disagreement(r)
-                if d == 'S-rej/M-keep':
+                if d == 'move-aside':
                     src = os.path.join(parent, r['relpath'])
                     # Light/<F>/name -> Light_rejected/<F>/name
                     dst = os.path.join(dest_root, os.path.relpath(r['home'], light_name))
                     reason = r['reason']
-                elif d == 'S-keep/M-rej' and sync:
+                elif d == 'bring-back' and sync:
                     src = os.path.join(parent, r['relpath'])
                     dst = os.path.join(parent, r['home'])
                     reason = 'back: ' + (r['reason'] or 'keep')
@@ -812,7 +853,7 @@ def apply_moves(parent, light_dir, groups, dest_root, sync):
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 shutil.move(src, dst)
                 mf.write(f'{src}\t{dst}\t{reason}\n')
-                if d == 'S-rej/M-keep':
+                if d == 'move-aside':
                     out += 1
                 else:
                     back += 1
