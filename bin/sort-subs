@@ -96,6 +96,8 @@ EXAMPLES
 
 import argparse
 import csv
+import re
+import json
 import os
 import shutil
 import sys
@@ -114,6 +116,15 @@ METRIC_FIELDS = [
 ]
 
 CACHE_NAME = 'sub-metrics.csv'
+CONF_NAME = 'sort-subs.conf'
+# exposure time straight from the file name (..._Lum_60_secs_1753.fits); the
+# FITS header is only read when the name does not carry it
+EXPTIME_RE = re.compile(r'_(\d+(?:\.\d+)?)_secs?_', re.I)
+# decision knobs remembered per object, so a later run (by hand or through
+# subs-pull --sort) repeats the policy of the last deliberate --apply
+KNOB_KEYS = ('star_frac', 'border_star_frac', 'max_star_frac', 'max_ecc', 'max_ecc_frac',
+             'max_fwhm_frac', 'max_ratio', 'border_ratio', 'percentile', 'min_stars',
+             'min_group', 'reject_border', 'reject_trails')
 
 
 # ----------------------------------------------------------------------------
@@ -452,12 +463,89 @@ def classify(rows, star_frac, border_star_frac, max_star_frac, max_ecc, k, borde
     return groups
 
 
+def resolve_light_dir(path):
+    """Accept <object>, <object>/Light or any dir; return the light dir."""
+    d = os.path.abspath(path)
+    if os.path.basename(d).lower() != 'light' and os.path.isdir(os.path.join(d, 'Light')):
+        d = os.path.join(d, 'Light')
+    return d
+
+
+def load_knobs(conf_path):
+    if not os.path.exists(conf_path):
+        return {}
+    try:
+        with open(conf_path) as fh:
+            data = json.load(fh)
+    except Exception as e:
+        print(f'ignoring {conf_path}: {e}', file=sys.stderr)
+        return {}
+    return {k: v for k, v in data.items() if k in KNOB_KEYS}
+
+
+def save_knobs(conf_path, a, defaults):
+    knobs = {k: getattr(a, k) for k in KNOB_KEYS if hasattr(a, k)}
+    with open(conf_path, 'w') as fh:
+        json.dump(knobs, fh, indent=2, sort_keys=True)
+        fh.write('\n')
+    changed = {k: v for k, v in knobs.items() if v != defaults.get(k)}
+    print(f'knobs saved to {conf_path}' +
+          (f' (non-default: {", ".join(f"{k}={v}" for k, v in sorted(changed.items()))})'
+           if changed else ' (all default)'))
+
+
 def fnum(v):
     """float() that maps '', None and 'nan' (cached CSV strings) to nan."""
     try:
         return float(v)
     except (TypeError, ValueError):
         return float('nan')
+
+
+def integration_totals(light_dir, parent, cache_path):
+    """Frame count and integration time per filter, split over the main tree and
+    the aside locations. Measures nothing: the exposure time comes from the
+    metrics cache when the frame is in it (that value was read from the FITS
+    header), otherwise from the file name, otherwise from the header."""
+    cached = {os.path.basename(r['relpath']): fnum(r['exptime'])
+              for r in load_cache(cache_path).values()}
+    per = defaultdict(lambda: {'main': [0, 0.0], 'aside': [0, 0.0]})
+    unknown = []
+    for f, rel, loc, home in scan_tree(light_dir, parent):
+        parts = home.split(os.sep)
+        filt = parts[1] if len(parts) > 2 else '(loose)'
+        base = os.path.basename(f)
+        m = EXPTIME_RE.search(base)
+        if cached.get(base):
+            exp = cached[base]
+        elif m:
+            exp = float(m.group(1))
+        else:
+            try:
+                exp = float(fits.getheader(f).get('EXPTIME', 0) or 0)
+            except Exception:
+                exp = 0.0
+            if not exp:
+                unknown.append(rel)
+        cell = per[filt][loc]
+        cell[0] += 1
+        cell[1] += exp
+    print(f"{'filter':<10} {'in Light':>9} {'time':>8}   {'set aside':>9} {'time':>8}   "
+          f"{'total':>9} {'time':>8}")
+    tot = {'main': [0, 0.0], 'aside': [0, 0.0]}
+    for filt in sorted(per):
+        m_, a_ = per[filt]['main'], per[filt]['aside']
+        print(f'{filt:<10} {m_[0]:>9} {hm(m_[1] / 3600):>8}   {a_[0]:>9} {hm(a_[1] / 3600):>8}   '
+              f'{m_[0] + a_[0]:>9} {hm((m_[1] + a_[1]) / 3600):>8}')
+        for k in ('main', 'aside'):
+            tot[k][0] += per[filt][k][0]
+            tot[k][1] += per[filt][k][1]
+    m_, a_ = tot['main'], tot['aside']
+    print(f'{"TOTAL":<10} {m_[0]:>9} {hm(m_[1] / 3600):>8}   {a_[0]:>9} {hm(a_[1] / 3600):>8}   '
+          f'{m_[0] + a_[0]:>9} {hm((m_[1] + a_[1]) / 3600):>8}')
+    if unknown:
+        print(f'({len(unknown)} frame(s) without an exposure time in the name or header, '
+              f'counted as 0, e.g. {unknown[0]})')
 
 
 def hm(hours):
@@ -503,6 +591,7 @@ def report(groups, show):
             tot['_srej_mkeep'] += len(srej_mkeep)
             tot['_skeep_mrej'] += len(skeep_mrej)
             tot['_aside'] += len(aside)
+            tot['_aside_h'] += sum(fnum(r['exptime']) for r in aside) / 3600
         print(line)
         tot[filt] += keep_h
         tot['_rej'] += len(rej)
@@ -512,7 +601,7 @@ def report(groups, show):
           ', '.join(f"{f}={hm(h)}" for f, h in sorted(tot.items()) if not f.startswith('_')))
     print(f"rejected: {int(tot['_rej'])}   borderline (blink these): {int(tot['_bord'])}")
     if any_aside:
-        print(f"manually set aside: {int(tot['_aside'])}   "
+        print(f"set aside on disk: {int(tot['_aside'])} = {hm(tot['_aside_h'])}   "
               f"script rejects but manually kept (S-rej/M-keep): {int(tot['_srej_mkeep'])}   "
               f"script keeps but manually rejected (S-keep/M-rej): {int(tot['_skeep_mrej'])}")
 
@@ -785,6 +874,8 @@ def main():
     g.add_argument('--min-stars', type=int, default=20, metavar='N',
                    help='REJECT when fewer than N stars are detected, regardless of the group '
                         '(absolute floor; the only rule that applies to tiny groups)')
+    g.add_argument('--ignore-knobs', action='store_true',
+                   help=f'ignore the per-object {CONF_NAME} and use the built-in defaults')
     g.add_argument('--reject-border', action='store_true',
                    help='treat BORDERLINE frames as REJECT (stricter selection)')
 
@@ -809,6 +900,9 @@ def main():
                         'only --min-stars applies to it')
 
     g = ap.add_argument_group('output (no files are moved)')
+    g.add_argument('--totals', action='store_true',
+                   help='print frames and integration time per filter (in Light/ vs set aside) '
+                        'and exit - no measuring, exposure time comes from the file name')
     g.add_argument('--show', choices=['rejected', 'border', 'diff', 'all'],
                    help='list frames of this class with metrics and reason; diff = frames where '
                         'the script disagrees with where the frame currently is')
@@ -841,10 +935,25 @@ def main():
     g.add_argument('--undo', metavar='MANIFEST',
                    help='move the files listed in MANIFEST back where they came from, then exit')
     a = ap.parse_args()
+    builtin_defaults = {k: ap.get_default(k) for k in KNOB_KEYS if hasattr(a, k)}
 
     if a.undo:
         undo(a.undo)
         return
+
+    # per-object knobs: what the last --apply used becomes the default here,
+    # so repeat runs keep the same policy. Anything given on the command line
+    # still wins, and --ignore-knobs falls back to the built-in defaults.
+    conf_path = os.path.join(os.path.dirname(resolve_light_dir(a.light_dir)), CONF_NAME)
+    if not a.ignore_knobs:
+        knobs = load_knobs(conf_path)
+        if knobs:
+            ap.set_defaults(**knobs)
+            a = ap.parse_args()
+            shown = {k: v for k, v in knobs.items() if v != builtin_defaults.get(k)}
+            print(f'knobs from {conf_path}' +
+                  (f': {", ".join(f"{k}={v}" for k, v in sorted(shown.items()))}'
+                   if shown else ' (all default)'), file=sys.stderr)
 
     light_dir = os.path.abspath(a.light_dir)
     if not os.path.isdir(light_dir):
@@ -860,6 +969,10 @@ def main():
     parent = os.path.dirname(light_dir)
     cache_path = os.path.join(parent, CACHE_NAME)
     dest_root = a.dest or os.path.join(parent, os.path.basename(light_dir) + '_rejected')
+
+    if a.totals:
+        integration_totals(light_dir, parent, cache_path)
+        return
 
     rows = collect(light_dir, parent, cache_path, a.recompute)
     if not rows:
@@ -877,6 +990,7 @@ def main():
         plot_nights(groups, os.path.join(parent, 'sub-metrics-plots'))
     if a.apply:
         apply_moves(parent, light_dir, groups, dest_root, a.sync)
+        save_knobs(conf_path, a, builtin_defaults)
     else:
         print('\n(dry run - use --apply to move rejected frames, --apply --sync to also move '
               'frames back that the script would keep)')
