@@ -644,7 +644,9 @@ def report(groups, show, apply=False, move_back=False):
             f"{basetxt} {typtxt} {hm(col['keep_h']):>7}  {fwtxt:>10}")
     if any_aside:
         line += f"  {sums['aside'][0]:>6} {sums['move'][0]:>6} {sums['back'][0]:>8}"
-    print(line + '     (bg/s, stars: group averages; fwhm: median over all kept frames)')
+    print(line)
+    print(f"{'':<10} {'':<5} on the ALL row bg/s and stars are frame-weighted averages of the "
+          f"group values, fwhm is the median over all kept frames")
     print()
     print('Kept:       ' + ', '.join(f'{f}={per[f][0]}/{hm(per[f][1] / 3600)}'
                                      for f in sorted(per, key=filter_key))
