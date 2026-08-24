@@ -585,10 +585,12 @@ def fmt_row(r):
             + (f"  [{r['location'].upper()} {disagreement(r)}]" if r['location'] == 'aside' or disagreement(r) else ''))
 
 
-def report(groups, show):
+def report(groups, show, apply=False, sync=False):
     any_aside = any(r['location'] == 'aside' for g in groups.values() for r in g)
     per = defaultdict(lambda: [0, 0.0])          # kept frames + seconds per filter
     sums = defaultdict(lambda: [0, 0.0])         # border / reject / aside, and move/back
+    col = defaultdict(float)                     # column sums for the ALL line
+    allrows = []
     print(f"{'night':<10} {'filt':<5} {'n':>4} {'keep':>4} {'bord':>4} {'rej':>4} "
           f"{'bg/s':>7} {'stars':>5} {'kept':>7}  {'fwhm(keep)':>10}"
           + (f"  {'inRej':>6} {'toRej':>6} {'toLights':>8}" if any_aside else ''))
@@ -619,8 +621,30 @@ def report(groups, show):
         for k, rows in (('bord', bord), ('rej', rej)):
             sums[k][0] += len(rows)
             sums[k][1] += secs(rows)
+        allrows += keep
+        for k, v in (('n', len(g)), ('keep', len(keep)), ('bord', len(bord)), ('rej', len(rej)),
+                     ('keep_h', keep_h)):
+            col[k] += v
+        if not np.isnan(base):                   # frame-weighted, so big groups count more
+            col['base'] += base * len(g)
+            col['base_n'] += len(g)
+        if not np.isnan(typ):
+            col['typ'] += typ * len(g)
+            col['typ_n'] += len(g)
     kept_n = sum(v[0] for v in per.values())
     kept_s = sum(v[1] for v in per.values())
+
+    nights = len({n for (n, _) in groups})
+    fw_all = [f for f in (fnum(r['fwhm']) for r in allrows) if not np.isnan(f)]
+    basetxt = f"{col['base'] / col['base_n']:7.1f}" if col['base_n'] else '    n/a'
+    typtxt = f"{col['typ'] / col['typ_n']:5.0f}" if col['typ_n'] else '  n/a'
+    fwtxt = f"{np.median(fw_all):.2f}" if fw_all else 'n/a'
+    line = (f"{str(nights) + ' nights':<10} {'ALL':<5} {int(col['n']):>4} {int(col['keep']):>4} "
+            f"{int(col['bord']):>4} {int(col['rej']):>4} "
+            f"{basetxt} {typtxt} {hm(col['keep_h']):>7}  {fwtxt:>10}")
+    if any_aside:
+        line += f"  {sums['aside'][0]:>6} {sums['move'][0]:>6} {sums['back'][0]:>8}"
+    print(line + '     (bg/s, stars: group averages; fwhm: median over all kept frames)')
     print()
     print('Kept:       ' + ', '.join(f'{f}={per[f][0]}/{hm(per[f][1] / 3600)}'
                                      for f in sorted(per, key=filter_key))
@@ -631,11 +655,16 @@ def report(groups, show):
           f"   -> Lights would hold {kept_n + sums['bord'][0]}/"
           f"{hm((kept_s + sums['bord'][1]) / 3600)}")
     if any_aside:
+        move = f"{sums['move'][0]}/{hm(sums['move'][1] / 3600)}"
+        back = f"{sums['back'][0]}/{hm(sums['back'][1] / 3600)}"
         if not (sums['move'][0] or sums['back'][0]):
             print('Nothing to move: the Lights and Rejected trees already match these verdicts.')
+        elif apply:                      # the moves happen right after this report
+            print(f"Moving to Rejected: {move}   bringing back into Lights: "
+                  + (back if sync else f"0/0h00m ({back} would come back with --sync)")
+                  + '   see the manifest line below')
         else:
-            print(f"To move to Rejected: {sums['move'][0]}/{hm(sums['move'][1] / 3600)} (--apply)"
-                  f"   to bring back into Lights: {sums['back'][0]}/{hm(sums['back'][1] / 3600)}"
+            print(f"To move to Rejected: {move} (--apply)   to bring back into Lights: {back}"
                   f" (--apply --sync)   list them with --show diff")
 
     if show:
@@ -783,7 +812,7 @@ def plot_nights(groups, out_dir):
             idx = [i for i, r in enumerate(g) if r['location'] == 'aside']
             if idx:
                 ax_st.plot([t[i] for i in idx], [stars[i] for i in idx], marker='+', ls='none',
-                           ms=9, color='black', mew=1.2, label='rejected on disk (manual/previous run)')
+                           ms=9, color='black', mew=1.2, label='rejected (manual/previous run)')
             base = g[0]['baseline']
             if not np.isnan(base):
                 exp = np.median([fnum(r['exptime']) for r in g])
@@ -1025,7 +1054,7 @@ def main():
     if a.explain:
         explain(groups, light_dir, a.explain)
         return
-    report(groups, a.show)
+    report(groups, a.show, a.apply, a.sync)
     if a.write:
         write_verdicts(groups, os.path.join(parent, 'sub-metrics-verdicts'))
     if a.plot:
