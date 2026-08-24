@@ -3,13 +3,13 @@
 
 Pulls frames from the acquisition host (vostro) into the local archive
 (~/astro/data) without dragging back frames that were already fetched AND
-afterwards set aside - by sort-subs into <object>/Light_rejected/<Filter>/, or
+afterwards rejected - by sort-subs into <object>/Light_rejected/<Filter>/, or
 by hand into <object>/Light/<Filter>/bad/. Plain rsync re-copies those forever,
 because at their original path they are simply "missing" on this side.
 
 HOW IT DECIDES WHAT IS NEW
   Every FITS file under the destination counts as "already have it", including
-  the ones in aside locations. The frames sitting aside are turned into rsync
+  the rejected ones. Those rejected frames are turned into rsync
   exclude patterns (matched on file name, so it does not matter that the file
   now lives in Light_rejected/ instead of Light/). Everything else rsync sorts
   out by itself: files that are already in place with the same size and time
@@ -265,7 +265,7 @@ def main():
         print(f'\n{src} -> {dest}')
         if os.path.isdir(dest):
             total, aside = scan_dest(dest)
-            print(f'  already local: {total} frames ({len(aside)} set aside)')
+            print(f'  already local: {total} frames ({len(aside)} rejected)')
         else:
             total, aside = 0, set()
             print('  new target (destination does not exist yet)')
