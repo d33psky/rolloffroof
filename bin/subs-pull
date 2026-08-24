@@ -42,6 +42,7 @@ EXAMPLES
 import argparse
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -197,17 +198,19 @@ def main():
                     help='... and pass --sync, so frames the fuller night now considers good are '
                          'moved back into Light/ (implies --sort-apply; note it also overrules '
                          'frames you moved into bad/ by hand)')
-    ap.add_argument('--sort-arg', action='append', default=[], metavar='OPT',
-                    help='extra sort-subs option, repeatable, e.g. --sort-arg --star-frac '
-                         '--sort-arg 0.4')
+    ap.add_argument('--sort-arg', action='append', default=[], metavar='OPTS',
+                    help='extra sort-subs options; split like a shell does, so several fit in '
+                         'one string: --sort-arg "--plot --star-frac 0.4". Repeatable. Not '
+                         'checked here, sort-subs sees them as given')
     ap.add_argument('--settle', type=int, default=60, metavar='MINUTES',
                     help='with --sort-apply: do not move anything while the newest frame is '
                          'younger than this, because the night is then only partly acquired and '
                          'the per-night statistics are still incomplete (default 60, 0 disables)')
     ap.add_argument('--no-exclude-aside', action='store_true',
                     help='do not exclude frames that are set aside locally (they come back)')
-    ap.add_argument('--rsync-arg', action='append', default=[], metavar='OPT',
-                    help='extra rsync option (repeatable); options after a literal -- work too')
+    ap.add_argument('--rsync-arg', action='append', default=[], metavar='OPTS',
+                    help='extra rsync options, split like a shell does and repeatable, e.g. '
+                         '--rsync-arg "--bwlimit=20M -v"; options after a literal -- work too')
     # split off everything after a standalone '--' before argparse sees it, so
     # that our own options keep working in front of it
     argv = sys.argv[1:]
@@ -217,6 +220,9 @@ def main():
         argv, extra = argv[:i], argv[i + 1:]
     sys.stdout.reconfigure(line_buffering=True)   # keep our output in step with rsync/sort-subs
     a = ap.parse_args(argv)
+    # one string may carry several options: --sort-arg "--plot --star-frac 0.4"
+    a.sort_arg = [w for s in a.sort_arg for w in shlex.split(s)]
+    a.rsync_arg = [w for s in a.rsync_arg for w in shlex.split(s)]
     if a.sort_sync:
         a.sort_apply = True
     if a.sort_apply:
