@@ -30,11 +30,18 @@ SAFETY
   KStars keeps counting), while the local tree is the archive. Propagating
   deletions in this direction would erase the archive.
 
+DRY RUN BY DEFAULT
+  Nothing happens without --apply: no transfer, and no moves in the --sort
+  stage either. --apply is the only switch that makes this run do something.
+
 EXAMPLES
-  subs-pull                          # vostro:APM/ -> ~/astro/data/, everything new
-  subs-pull -n                       # dry run: show what would come over
-  subs-pull NGC_6285                 # only that target
-  subs-pull NGC_6285 NGC_6043 --days 3
+  subs-pull                          # dry run: what would come over from vostro:APM/
+  subs-pull NGC_6285                 # only that target, still a dry run
+  subs-pull NGC_6285 --apply         # transfer
+  subs-pull NGC_6285 --apply --sort  # ... and sort the object afterwards
+  subs-pull NGC_6285 --apply --sort --sort-arg "--plot --write"
+  subs-pull NGC_6285 --apply --sort --sort-also-move-back
+  subs-pull NGC_6285 NGC_6043 --days 3 --apply
   subs-pull --src vostro:APM/NGC_6285/Light/Lum/ --dest ~/astro/data/NGC_6285/Light/Lum/
   subs-pull NGC_6285 --days 3 -- --bwlimit=20M     # extra rsync options after --
 """
@@ -88,10 +95,9 @@ def sort_object(dest, a, pull_applied):
         print('  sort-subs skipped: this object is not sorted yet '
               '(no sub-metrics.csv, no Light_rejected/) - run sort-subs on it once by hand')
         return 0
-    do_apply = a.sort_apply
-    if do_apply and not pull_applied:
-        print('  sort-subs: measure and report only (the pull itself is a dry run)')
-        do_apply = False
+    do_apply = pull_applied
+    if not do_apply:
+        print('  sort-subs: measure and report only (this run is a dry run)')
     if do_apply:
         age = newest_frame_age(obj)
         if age is not None and age < a.settle:
@@ -101,11 +107,26 @@ def sort_object(dest, a, pull_applied):
     cmd = [SORT_SUBS, obj]
     if do_apply:
         cmd.append('--apply')
-        if a.sort_sync:
-            cmd.append('--sync')
+        if a.sort_also_move_back:
+            cmd.append('--move-back')
     cmd += a.sort_arg
     print(f'  running: {" ".join(cmd)}')
     return subprocess.run(cmd).returncode
+
+
+def glue_values(argv, names=('--sort-arg', '--rsync-arg')):
+    """argparse refuses a value that starts with '-' (unless it contains a space),
+    but these two options always take exactly such a value. Rewrite
+    '--sort-arg --plot' into '--sort-arg=--plot' so both forms work."""
+    out, i = [], 0
+    while i < len(argv):
+        if argv[i] in names and i + 1 < len(argv):
+            out.append(f'{argv[i]}={argv[i + 1]}')
+            i += 2
+        else:
+            out.append(argv[i])
+            i += 1
+    return out
 
 
 def scan_dest(dest):
@@ -172,7 +193,8 @@ def main():
     ap.add_argument('targets', nargs='*',
                     help='object directories under the source root (default: the whole tree)')
     ap.add_argument('--apply', action='store_true',
-                    help='actually transfer (default: dry run, nothing is written)')
+                    help='the only switch that makes this run do anything: transfer the frames, '
+                         'and with --sort also let sort-subs move rejects (default: dry run)')
     ap.add_argument('-n', '--dry-run', action='store_true',
                     help='accepted for habit; dry run is the default anyway')
     ap.add_argument('--days', type=int, metavar='N',
@@ -189,25 +211,25 @@ def main():
     ap.add_argument('-v', '--verbose', action='store_true', help='list the transferred files')
     ap.add_argument('--sort', action='store_true',
                     help='after the transfer run sort-subs on the object: measure the new frames '
-                         'into <object>/sub-metrics.csv and report. Only for objects that are '
-                         'already sorted (sub-metrics.csv or Light_rejected/ present)')
-    ap.add_argument('--sort-apply', action='store_true',
-                    help='... and let sort-subs move rejected frames to Light_rejected/ '
-                         '(implies --sort)')
-    ap.add_argument('--sort-sync', action='store_true',
-                    help='... and pass --sync, so frames the fuller night now considers good are '
-                         'moved back into Light/ (implies --sort-apply; note it also overrules '
-                         'frames you moved into bad/ by hand)')
+                         'into <object>/sub-metrics.csv and report. With --apply it also moves '
+                         'rejected frames to Light_rejected/, without it nothing moves. Only for '
+                         'objects that are already sorted (sub-metrics.csv or Light_rejected/ '
+                         'present)')
+    ap.add_argument('--sort-also-move-back', action='store_true',
+                    help='... and let sort-subs also move frames back into Light/ that the now '
+                         'fuller night considers good (implies --sort; note it overrules frames '
+                         'you rejected by hand into bad/)')
     ap.add_argument('--sort-arg', action='append', default=[], metavar='OPTS',
                     help='extra sort-subs options; split like a shell does, so several fit in '
                          'one string: --sort-arg "--plot --star-frac 0.4". Repeatable. Not '
                          'checked here, sort-subs sees them as given')
     ap.add_argument('--settle', type=int, default=60, metavar='MINUTES',
-                    help='with --sort-apply: do not move anything while the newest frame is '
+                    help='with --apply --sort: do not move anything while the newest frame is '
                          'younger than this, because the night is then only partly acquired and '
                          'the per-night statistics are still incomplete (default 60, 0 disables)')
-    ap.add_argument('--no-exclude-aside', action='store_true',
-                    help='do not exclude frames that are set aside locally (they come back)')
+    ap.add_argument('--refetch-rejected', action='store_true',
+                    help='fetch rejected frames again: drop the exclusions, so everything that '
+                         'sits in Light_rejected/ or bad/ is copied back into Light/ as well')
     ap.add_argument('--rsync-arg', action='append', default=[], metavar='OPTS',
                     help='extra rsync options, split like a shell does and repeatable, e.g. '
                          '--rsync-arg "--bwlimit=20M -v"; options after a literal -- work too')
@@ -219,13 +241,11 @@ def main():
         i = argv.index('--')
         argv, extra = argv[:i], argv[i + 1:]
     sys.stdout.reconfigure(line_buffering=True)   # keep our output in step with rsync/sort-subs
-    a = ap.parse_args(argv)
+    a = ap.parse_args(glue_values(argv))
     # one string may carry several options: --sort-arg "--plot --star-frac 0.4"
     a.sort_arg = [w for s in a.sort_arg for w in shlex.split(s)]
     a.rsync_arg = [w for s in a.rsync_arg for w in shlex.split(s)]
-    if a.sort_sync:
-        a.sort_apply = True
-    if a.sort_apply:
+    if a.sort_also_move_back:
         a.sort = True
 
     extra = a.rsync_arg + extra
@@ -250,7 +270,7 @@ def main():
 
         filters = []
         tmp = None
-        if aside and not a.no_exclude_aside:
+        if aside and not a.refetch_rejected:
             tmp = tempfile.NamedTemporaryFile('w', prefix='subs-pull-', suffix='.excl',
                                               delete=False)
             tmp.write('\n'.join(quote_pattern(n) for n in sorted(aside)) + '\n')

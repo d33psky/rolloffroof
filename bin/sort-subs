@@ -75,14 +75,14 @@ COMPARING WITH YOUR OWN SORTING
     move aside   a frame still in Light/ that this run rejects; --apply moves
                  it to Light_rejected/<Filter>/
     bring back   a frame in Light_rejected/ or in your hand-made bad/ that this
-                 run keeps; only --apply --sync moves it home again
-  So to see what --sync would do before running it: look at the "bring back"
+                 run keeps; only --apply --move-back moves it home again
+  So to see what --move-back would do before running it: look at "bring back"
   count and list those frames with --show diff (or --write, diff.tsv).
 
 MOVING (never deletes)
   Nothing moves unless --apply is given. Rejects go to
       <object>/Light_rejected/<Filter>/
-  With --apply --sync, frames the script would keep are also moved back home
+  With --apply --move-back, frames the script would keep are also moved back home
   from any aside location (that includes your hand-made bad/ dirs!).
   Every move is recorded in a manifest; --undo MANIFEST reverses it.
 
@@ -94,7 +94,7 @@ EXAMPLES
   sort-subs ~/astro/data/NGC_6285/Light --star-frac 0.4 --show border
   sort-subs ~/astro/data/NGC_6285/Light --apply
   sort-subs ~/astro/data/NGC_2841/Light --show diff     # compare with hand-sorted bad/
-  sort-subs ~/astro/data/NGC_2841/Light --star-frac 0.4 --apply --sync
+  sort-subs ~/astro/data/NGC_2841/Light --star-frac 0.4 --apply --move-back
   sort-subs ~/astro/data/NGC_6285/Light --undo ~/astro/data/NGC_6285/Light_rejected/manifest-*.tsv
 """
 
@@ -331,7 +331,7 @@ def scan_tree(light_dir, parent):
 def collect(light_dir, parent, cache_path, recompute=False):
     """Return {relpath: metrics} for all frames (main + aside locations)."""
     cache = {} if recompute else load_cache(cache_path)
-    # moved frames (apply/sync/manual) keep their metrics: fall back to basename+mtime+size
+    # moved frames (apply/move-back/manual) keep their metrics: fall back to basename+mtime+size
     by_ident = {(os.path.basename(c['relpath']), int(float(c['mtime'])), int(c['size'])): c
                 for c in cache.values()}
     found = list(scan_tree(light_dir, parent))
@@ -585,7 +585,7 @@ def fmt_row(r):
             + (f"  [{r['location'].upper()} {disagreement(r)}]" if r['location'] == 'aside' or disagreement(r) else ''))
 
 
-def report(groups, show, apply=False, sync=False):
+def report(groups, show, apply=False, move_back=False):
     any_aside = any(r['location'] == 'aside' for g in groups.values() for r in g)
     per = defaultdict(lambda: [0, 0.0])          # kept frames + seconds per filter
     sums = defaultdict(lambda: [0, 0.0])         # border / reject / aside, and move/back
@@ -661,11 +661,11 @@ def report(groups, show, apply=False, sync=False):
             print('Nothing to move: the Lights and Rejected trees already match these verdicts.')
         elif apply:                      # the moves happen right after this report
             print(f"Moving to Rejected: {move}   bringing back into Lights: "
-                  + (back if sync else f"0/0h00m ({back} would come back with --sync)")
+                  + (back if move_back else f"0/0h00m ({back} would come back with --move-back)")
                   + '   see the manifest line below')
         else:
             print(f"To move to Rejected: {move} (--apply)   to bring back into Lights: {back}"
-                  f" (--apply --sync)   list them with --show diff")
+                  f" (--apply --move-back)   list them with --show diff")
 
     if show:
         print()
@@ -684,7 +684,7 @@ def disagreement(r):
     """Where the frame is versus where this run says it belongs:
     'move-aside'  a frame still in Light/ that the script rejects  (--apply moves it out)
     'bring-back'  a frame in Light_rejected/ or bad/ that the script keeps
-                  (--apply --sync moves it home)
+                  (--apply --move-back moves it home)
     '' when the frame is already where the script wants it."""
     if r['verdict'] == 'reject' and r['location'] == 'main':
         return 'move-aside'
@@ -852,9 +852,9 @@ def plot_nights(groups, out_dir):
 # move / undo
 # ----------------------------------------------------------------------------
 
-def apply_moves(parent, light_dir, groups, dest_root, sync):
+def apply_moves(parent, light_dir, groups, dest_root, move_back):
     """Move script-rejects that are still in the main tree to dest_root/<Filter>/.
-    With sync=True also move non-rejects found in any aside location back to
+    With move_back=True also move non-rejects found in any aside location back to
     their home in the main tree (this includes hand-made bad/ dirs)."""
     ts = datetime.now().strftime('%Y%m%dT%H%M%S')
     os.makedirs(dest_root, exist_ok=True)
@@ -871,7 +871,7 @@ def apply_moves(parent, light_dir, groups, dest_root, sync):
                     # Light/<F>/name -> Light_rejected/<F>/name
                     dst = os.path.join(dest_root, os.path.relpath(r['home'], light_name))
                     reason = r['reason']
-                elif d == 'bring-back' and sync:
+                elif d == 'bring-back' and move_back:
                     src = os.path.join(parent, r['relpath'])
                     dst = os.path.join(parent, r['home'])
                     reason = 'back: ' + (r['reason'] or 'keep')
@@ -995,9 +995,10 @@ def main():
     g.add_argument('--apply', action='store_true',
                    help='move REJECT frames out of the main tree into <object>/Light_rejected/<Filter>/ '
                         'and write a manifest')
-    g.add_argument('--sync', action='store_true',
-                   help='with --apply: also move frames the script would KEEP from any aside '
-                        'location (Light_rejected/, <Filter>/bad/, <Filter>/rejected/) back home')
+    g.add_argument('--move-back', action='store_true',
+                   help='with --apply: also move frames the script would KEEP out of the rejected '
+                        'locations (Light_rejected/, <Filter>/bad/, <Filter>/rejected/) back into '
+                        'Light/ - this overrules frames you rejected by hand')
     g.add_argument('--any-dir', action='store_true',
                    help='allow a light dir that is not called Light/ (layout must still be '
                         '<dir>/<Filter>/*.fits)')
@@ -1054,16 +1055,16 @@ def main():
     if a.explain:
         explain(groups, light_dir, a.explain)
         return
-    report(groups, a.show, a.apply, a.sync)
+    report(groups, a.show, a.apply, a.move_back)
     if a.write:
         write_verdicts(groups, os.path.join(parent, 'sub-metrics-verdicts'))
     if a.plot:
         plot_nights(groups, os.path.join(parent, 'sub-metrics-plots'))
     if a.apply:
-        apply_moves(parent, light_dir, groups, dest_root, a.sync)
+        apply_moves(parent, light_dir, groups, dest_root, a.move_back)
         save_knobs(conf_path, a, builtin_defaults)
     else:
-        print('\n(dry run - use --apply to move rejected frames, --apply --sync to also move '
+        print('\n(dry run - use --apply to move rejected frames, --apply --move-back to also move '
               'frames back that the script would keep)')
 
 
