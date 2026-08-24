@@ -85,10 +85,16 @@ MOVING (never deletes)
   With --apply --move-back, frames the script would keep are also moved back home
   from any aside location (that includes your hand-made bad/ dirs!).
   Every move is recorded in a manifest; --undo MANIFEST reverses it.
+  --settle MINUTES holds back the moves of a night whose newest frame is
+  younger than that: acquisition is probably still running, so the night is
+  only half there and its typical/baseline are not final yet. The other nights
+  move as usual, so last night gets sorted while tonight is being shot.
 
 EXAMPLES
   sort-subs ~/astro/data/NGC_6285/Light                 # measure + report (dry run)
   sort-subs ~/astro/data/NGC_6285/Light --write --plot  # + verdict files + PNG per night
+  sort-subs ~/astro/data/NGC_6285 --plot 1              # redraw only the last night
+  sort-subs ~/astro/data/NGC_6285 --apply --settle 60   # sort, but not tonight's frames
   sort-subs ~/astro/data/NGC_6285/Light --show rejected
   sort-subs ~/astro/data/NGC_6285/Light --explain 2026-08-15T05-33-37_..._2133.fits
   sort-subs ~/astro/data/NGC_6285/Light --star-frac 0.4 --show border
@@ -105,6 +111,7 @@ import json
 import os
 import shutil
 import sys
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -585,7 +592,22 @@ def fmt_row(r):
             + (f"  [{r['location'].upper()} {disagreement(r)}]" if r['location'] == 'aside' or disagreement(r) else ''))
 
 
-def report(groups, show, apply=False, move_back=False):
+def hot_nights(groups, settle):
+    """Nights whose newest frame is younger than `settle` minutes: acquisition is
+    probably still running, so the night is only partly there and its typical /
+    baseline are not final yet. Nothing may be moved out of such a night."""
+    if not settle:
+        return set()
+    now = time.time()
+    hot = set()
+    for (night, _), g in groups.items():
+        newest = max((fnum(r.get('mtime')) for r in g), default=float('nan'))
+        if not np.isnan(newest) and (now - newest) / 60 < settle:
+            hot.add(night)
+    return hot
+
+
+def report(groups, show, apply=False, move_back=False, hold=frozenset()):
     any_aside = any(r['location'] == 'aside' for g in groups.values() for r in g)
     per = defaultdict(lambda: [0, 0.0])          # kept frames + seconds per filter
     sums = defaultdict(lambda: [0, 0.0])         # border / reject / aside, and move/back
@@ -668,6 +690,11 @@ def report(groups, show, apply=False, move_back=False):
         else:
             print(f"To move to Rejected: {move} (--apply)   to bring back into Lights: {back}"
                   f" (--apply --move-back)   list them with --show diff")
+        held = [r for g in groups.values() for r in g
+                if r['night'] in hold and would_move(r, move_back)]
+        if held:
+            print(f"Held back by --settle: {len(held)}/{hm(secs(held) / 3600)} of these are in "
+                  f"{', '.join(sorted(hold))}, still being acquired - sort that night when it is done")
 
     if show:
         print()
@@ -675,6 +702,12 @@ def report(groups, show, apply=False, move_back=False):
             for r in groups[key]:
                 if is_shown(r, show):
                     print(fmt_row(r))
+
+
+def would_move(r, move_back):
+    """True when --apply (plus --move-back) would move this frame."""
+    d = disagreement(r)
+    return d == 'move-aside' or (d == 'bring-back' and move_back)
 
 
 def secs(rows):
@@ -771,7 +804,24 @@ FILTER_COLORS = {'Lum': 'gray', 'Red': 'red', 'Green': 'green', 'Blue': 'blue',
 VERDICT_MARK = {'keep': ('o', 'none'), 'border': ('s', 'gold'), 'reject': ('x', 'black')}
 
 
-def plot_nights(groups, out_dir):
+def select_nights(nights, want):
+    """--plot value -> the nights to redraw: nothing = all, a number = the N most
+    recent, otherwise YYYY-MM-DD dates."""
+    if not want:
+        return nights
+    if len(want) == 1 and want[0].isdigit():
+        return nights[-int(want[0]):]
+    bad = [w for w in want if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', w)]
+    if bad:
+        sys.exit(f'--plot takes no value (all nights), a number, or YYYY-MM-DD nights; '
+                 f'{bad[0]!r} is neither (a directory goes in front of the options)')
+    miss = [w for w in want if w not in nights]
+    if miss:
+        print(f'no frames for night(s) {", ".join(miss)}', file=sys.stderr)
+    return [n for n in nights if n in want]
+
+
+def plot_nights(groups, out_dir, want=None):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -779,7 +829,7 @@ def plot_nights(groups, out_dir):
     import matplotlib.ticker as ticker
 
     os.makedirs(out_dir, exist_ok=True)
-    nights = sorted({n for (n, _) in groups})
+    nights = select_nights(sorted({n for (n, _) in groups}), want)
     for night in nights:
         fig, axes = plt.subplots(4, 1, figsize=(12, 11), sharex=True)
         ax_bg, ax_st, ax_fw, ax_ec = axes
@@ -854,7 +904,7 @@ def plot_nights(groups, out_dir):
 # move / undo
 # ----------------------------------------------------------------------------
 
-def apply_moves(parent, light_dir, groups, dest_root, move_back):
+def apply_moves(parent, light_dir, groups, dest_root, move_back, hold=frozenset()):
     """Move script-rejects that are still in the main tree to dest_root/<Filter>/.
     With move_back=True also move non-rejects found in any aside location back to
     their home in the main tree (this includes hand-made bad/ dirs)."""
@@ -862,12 +912,15 @@ def apply_moves(parent, light_dir, groups, dest_root, move_back):
     os.makedirs(dest_root, exist_ok=True)
     manifest = os.path.join(dest_root, f'manifest-{ts}.tsv')
     light_name = os.path.basename(light_dir)
-    out = back = 0
+    out = back = held = 0
     with open(manifest, 'w') as mf:
         mf.write('src\tdst\treason\n')
         for key in sorted(groups):
             for r in groups[key]:
                 d = disagreement(r)
+                if r['night'] in hold and would_move(r, move_back):
+                    held += 1                  # night still being acquired
+                    continue
                 if d == 'move-aside':
                     src = os.path.join(parent, r['relpath'])
                     # Light/<F>/name -> Light_rejected/<F>/name
@@ -889,7 +942,9 @@ def apply_moves(parent, light_dir, groups, dest_root, move_back):
                     out += 1
                 else:
                     back += 1
-    print(f'moved {out} files to {dest_root}, {back} files back home; manifest: {manifest}')
+    print(f'moved {out} files to {dest_root}, {back} files back home'
+          + (f', {held} held back by --settle' if held else '')
+          + f'; manifest: {manifest}')
 
 
 def undo(manifest):
@@ -986,10 +1041,12 @@ def main():
                    help='write <object>/sub-metrics-verdicts/: all.tsv (every frame), blink.tsv '
                         '(rejected+borderline with reasons), diff.tsv, and bare file lists '
                         'rejected.txt / border.txt / keep.txt')
-    g.add_argument('--plot', action='store_true',
+    g.add_argument('--plot', nargs='*', default=None, metavar='N|NIGHT',
                    help='write one PNG per night to <object>/sub-metrics-plots/ (background, '
                         'stars, FWHM, eccentricity vs time; o keep, square borderline, x reject, '
-                        '+ set aside, | trail)')
+                        '+ rejected, | trail). Without a value every night is redrawn (verdicts '
+                        'of older nights can change too); a number redraws the N most recent '
+                        'nights, one or more YYYY-MM-DD redraw exactly those')
     g.add_argument('--recompute', action='store_true',
                    help='ignore the metrics cache and measure every frame again')
 
@@ -1001,6 +1058,11 @@ def main():
                    help='with --apply: also move frames the script would KEEP out of the rejected '
                         'locations (Light_rejected/, <Filter>/bad/, <Filter>/rejected/) back into '
                         'Light/ - this overrules frames you rejected by hand')
+    g.add_argument('--settle', type=int, default=0, metavar='MINUTES',
+                   help='hold back the moves of a night whose newest frame is younger than this: '
+                        'acquisition is probably still running, the night is only half there and '
+                        'its typical/baseline are not final. Other nights are moved as usual. '
+                        '0 = no hold. subs-pull passes its own --settle here')
     g.add_argument('--any-dir', action='store_true',
                    help='allow a light dir that is not called Light/ (layout must still be '
                         '<dir>/<Filter>/*.fits)')
@@ -1028,6 +1090,12 @@ def main():
             print(f'knobs from {conf_path}' +
                   (f': {", ".join(f"{k}={v}" for k, v in sorted(shown.items()))}'
                    if shown else ' (all default)'), file=sys.stderr)
+
+    # '--plot <dir>' would swallow the directory: --plot takes nights, not paths
+    for v in a.plot or []:
+        if os.sep in v or os.path.isdir(v):
+            sys.exit(f'--plot takes nights (a number or YYYY-MM-DD), not a path. Put the '
+                     f'directory first: sort-subs {v} --plot')
 
     light_dir = os.path.abspath(a.light_dir)
     if not os.path.isdir(light_dir):
@@ -1057,13 +1125,14 @@ def main():
     if a.explain:
         explain(groups, light_dir, a.explain)
         return
-    report(groups, a.show, a.apply, a.move_back)
+    hold = hot_nights(groups, a.settle)
+    report(groups, a.show, a.apply, a.move_back, hold)
     if a.write:
         write_verdicts(groups, os.path.join(parent, 'sub-metrics-verdicts'))
-    if a.plot:
-        plot_nights(groups, os.path.join(parent, 'sub-metrics-plots'))
+    if a.plot is not None:
+        plot_nights(groups, os.path.join(parent, 'sub-metrics-plots'), a.plot)
     if a.apply:
-        apply_moves(parent, light_dir, groups, dest_root, a.move_back)
+        apply_moves(parent, light_dir, groups, dest_root, a.move_back, hold)
         save_knobs(conf_path, a, builtin_defaults)
     else:
         print('\n(dry run - use --apply to move rejected frames, --apply --move-back to also move '
