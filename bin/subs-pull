@@ -17,6 +17,11 @@ HOW IT DECIDES WHAT IS NEW
   With --days / --since an extra include window on the date in the file name
   is applied, which only makes the transfer list shorter (and rsync faster) -
   it is not what keeps the rejected frames away.
+  There is deliberately no switch to fetch rejected frames again: it would
+  copy them to their original path while the local copy stays in
+  Light_rejected/, giving you the same frame twice. Rejected frames are
+  reconsidered locally instead - sort-subs measures them on every run and
+  moves the ones a fuller night considers good back with --apply --move-back.
 
 Running it repeatedly during an imaging session is fine: a frame that was still
 being written comes over short, and the next run replaces it (size and time
@@ -227,9 +232,6 @@ def main():
                     help='with --apply --sort: do not move anything while the newest frame is '
                          'younger than this, because the night is then only partly acquired and '
                          'the per-night statistics are still incomplete (default 60, 0 disables)')
-    ap.add_argument('--refetch-rejected', action='store_true',
-                    help='fetch rejected frames again: drop the exclusions, so everything that '
-                         'sits in Light_rejected/ or bad/ is copied back into Light/ as well')
     ap.add_argument('--rsync-arg', action='append', default=[], metavar='OPTS',
                     help='extra rsync options, split like a shell does and repeatable, e.g. '
                          '--rsync-arg "--bwlimit=20M -v"; options after a literal -- work too')
@@ -270,7 +272,7 @@ def main():
 
         filters = []
         tmp = None
-        if aside and not a.refetch_rejected:
+        if aside:
             tmp = tempfile.NamedTemporaryFile('w', prefix='subs-pull-', suffix='.excl',
                                               delete=False)
             tmp.write('\n'.join(quote_pattern(n) for n in sorted(aside)) + '\n')
