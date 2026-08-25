@@ -515,8 +515,10 @@ def process_channel(name, img, valid, hdr, a, log, starless=None):
     # --- multiplicative flat
     # with a starless model source the surroundings of masked objects carry the
     # true local background (hole, rings) right up to the mask edge - local
-    # interpolation beats the radial ring-average there
-    fill_mode = 'nearest' if starless is not None else a.fill
+    # interpolation beats the radial ring-average there. That stops being true
+    # for a hand-drawn --mask-region wide enough to swallow a ring or the
+    # central hole, so an explicit --fill wins over this default.
+    fill_mode = a.fill or ('nearest' if starless is not None else 'radial')
     model, holes, (gh, gw) = mesh_background(step1_src, good, cell, fill=fill_mode, center=a.center)
     if a.radial:
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -636,10 +638,14 @@ def main():
                    help='mesh cell size for the multiplicative flat (default min(w,h)/45, '
                         '~65 px on a 3k-high stack). Smaller follows rings better but starts '
                         'absorbing real large-scale nebulosity into the flat')
-    g.add_argument('--fill', choices=['radial', 'nearest'], default='radial',
+    g.add_argument('--fill', choices=['radial', 'nearest'], default=None,
                    help='how masked mesh cells are filled: radial = from cells at the same '
-                        'ring radius (keeps the central hole / ring depth under masked '
-                        'galaxies; default), nearest = from neighbouring cells')
+                        'ring radius, which keeps the central hole and the ring depth under a '
+                        'masked object; nearest = from the neighbouring cells. Default: nearest '
+                        'with --starnet (the starless image carries the true background right up '
+                        'to the mask edge), radial without it. Give it explicitly when a wide '
+                        '--mask-region swallows a ring or the central hole - filling that from '
+                        'the rim leaves the artifact uncorrected')
     g.add_argument('--big-halo', type=float, default=1.0, metavar='F',
                    help='extra mask halo around big components, F x their radius (default 1.0); '
                         'smaller lets more pixels near galaxies constrain the model')
