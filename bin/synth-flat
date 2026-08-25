@@ -767,17 +767,22 @@ def main():
                 break
             t = b = l = rr = a.edge_trim
         if any((t, b, l, rr)):
-            log(f'edge bands detected -> trimming top {t}, bottom {b}, left {l}, right {rr} px '
+            log(f'edge bands detected -> trimming bottom {t}, top {b}, left {l}, right {rr} px '
                 f'and recomputing')
             H, W = imgs[0].shape
             imgs = [d[t:H - b, l:W - rr] for d in imgs]
             valids = [v[t:H - b, l:W - rr] for v in valids]
             starlesses = [sl[t:H - b, l:W - rr] if sl is not None else None for sl in starlesses]
+            # hand-drawn regions are absolute pixel coordinates: they have to
+            # follow the trim, or they would sit next to their object afterwards
+            a.regions = [(cx - l, cy - t, r) for (cx, cy, r) in a.regions]
             for h in hdrs:
                 if 'CRPIX1' in h:
                     h['CRPIX1'] = h['CRPIX1'] - l
                     h['CRPIX2'] = h['CRPIX2'] - t
-            history.append(f'edge-trimmed top {t}, bottom {b}, left {l}, right {rr} px '
+            # t/b are array rows: row 0 is the BOTTOM of the image as FITS
+            # viewers show it, so report them the way they are seen
+            history.append(f'edge-trimmed bottom {t}, top {b}, left {l}, right {rr} px '
                            f'(stack coverage bands)')
             results = run_all(imgs, valids, starlesses)
         else:
