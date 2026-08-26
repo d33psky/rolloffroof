@@ -139,10 +139,13 @@ def keep_list(target):
         return {os.path.basename(l.strip()) for l in fh if l.strip()}
 
 
-def collect(targets, filt, per_target, verbose):
-    """candidate frames per target: only from Light/ (never Light_rejected/),
-    restricted to sort-subs' keep list when there is one, spread over nights"""
-    out = []
+def collect(targets, filt):
+    """All candidate frames per target: only from Light/ (never Light_rejected/),
+    restricted to sort-subs' keep list when there is one. No sampling here - the
+    equipment filter has to run first, or a target holding an old campaign shot
+    with another camera (M-101 has 1382 ASI1600 frames from 2022 next to 30
+    current ones) spends its whole quota on frames that get dropped after."""
+    out = {}
     for t in targets:
         tdir = t if os.path.isdir(t) else os.path.join(DATA_ROOT, t)
         if not os.path.isdir(tdir):
@@ -161,81 +164,59 @@ def collect(targets, filt, per_target, verbose):
         if not files:
             print(f'  {tdir}: no {filt} frames', file=sys.stderr)
             continue
-        by_night = defaultdict(list)
-        for f in files:
-            m = re.search(r'(\d{4}-\d{2}-\d{2})T', os.path.basename(f))
-            by_night[m.group(1) if m else '?'].append(f)
-        picked, nights = [], sorted(by_night)
-        i = 0
-        while len(picked) < per_target and any(by_night.values()):   # round robin over nights
-            n = nights[i % len(nights)]
-            if by_night[n]:
-                step = max(1, len(by_night[n]) // 40)
-                picked.append(by_night[n].pop(len(by_night[n]) // 2 if step == 1 else 0))
-            i += 1
-            if i > 100000:
-                break
-        out += picked
-        if verbose:
-            print(f'  {os.path.basename(tdir):12} {len(picked):4} of {len(files)} frames'
-                  f' over {len(nights)} nights'
-                  + ('' if keep is None else '  (sort-subs keep list applied)'))
+        out[tdir] = (files, keep is not None)
     return out
 
 
-def find_master(tdir, kind, cam_dims, gain=None, exptime=None):
-    """APP master frames sit in the target dir:
-       MD-IG_<gain>-E<exp>s-<cam>-<w>x<h>.fits, BPM-<cam>-<w>x<h>.fits"""
-    for f in sorted(glob.glob(os.path.join(tdir, f'{kind}-*.fits'))):
-        b = os.path.basename(f)
-        if cam_dims not in b:
-            continue
-        if gain is not None and f'IG_{gain:.1f}' not in b:
-            continue
-        if exptime is not None and not re.search(rf'-E{exptime:g}(\.0)?s-', b):
-            continue
-        return f
-    return None
-
-
-def star_map(a):
-    hp = a - ndimage.median_filter(a, 7)
-    sig = float(np.median(np.abs(hp)) * 1.4826)
-    return np.clip(hp / max(sig, 1e-6) - 4, 0, 30)
-
-
-def measure_dither(files, n=16):
-    """Real dither, in pixels: the star field shift between consecutive subs of
-    one night, by FFT cross correlation. NOT from CRVAL - that is the mount's
-    reported pointing, which shows the offsets that were commanded, not the ones
-    the guider actually let happen (measured 2026-08-26: three targets reported
-    dither steps while their stars never moved)."""
+def spread_over_nights(files, want):
+    """pick `want` frames spread evenly over the nights they came from"""
     by_night = defaultdict(list)
     for f in files:
         m = re.search(r'(\d{4}-\d{2}-\d{2})T', os.path.basename(f))
         by_night[m.group(1) if m else '?'].append(f)
-    night = max(by_night, key=lambda k: len(by_night[k]))
-    # consecutive frames of that night, taken from the directory itself: the
-    # superflat's own selection is spread out and would miss a dither that only
-    # happens every few frames
-    d = os.path.dirname(by_night[night][0])
-    fs = sorted(f for f in glob.glob(d + '/*')
-                if os.path.basename(f).startswith(night) and f.lower().endswith(FITS_EXT))
-    fs = fs[len(fs) // 3:][:n]
-    if len(fs) < 4:
-        return None
-    steps, prev = [], None
-    for f in fs:
-        sm = star_map(fits.getdata(f).astype(np.float32))
-        if prev is not None:
-            A, B = np.fft.rfft2(sm), np.fft.rfft2(prev)
-            r = np.fft.irfft2(A * np.conj(B), s=sm.shape)
-            dy, dx = np.unravel_index(np.argmax(r), r.shape)
-            dy -= sm.shape[0] if dy > sm.shape[0] // 2 else 0
-            dx -= sm.shape[1] if dx > sm.shape[1] // 2 else 0
-            steps.append(float(np.hypot(dx, dy)))
-        prev = sm
-    return steps
+    nights = sorted(by_night)
+    picked, i = [], 0
+    while len(picked) < want and any(by_night.values()):
+        n = nights[i % len(nights)]
+        if by_night[n]:
+            picked.append(by_night[n].pop(len(by_night[n]) // 2))
+        i += 1
+        if i > 200000:
+            break
+    return sorted(picked), len(nights)
+
+
+def find_master(tdir, kind, cam_dims, gain=None, exptime=None, pool=None):
+    """APP master frames sit in a target dir:
+       MD-IG_<gain>-E<exp>s-<cam>-<w>x<h>[-all_channels].fits, BPM-<cam>-<w>x<h>.fits
+    Look in the frame's own target first, then anywhere else under the data
+    root: a session that shot 300 s subs often has no 300 s dark of its own,
+    while another target does, and the dark only has to match camera, binning,
+    gain and exposure - not the target."""
+    def matches(f):
+        b = os.path.basename(f)
+        if not b.startswith(kind + '-') or cam_dims not in b:
+            return False
+        if gain is not None and f'IG_{gain:.1f}' not in b:
+            return False
+        if exptime is not None and not re.search(rf'-E{exptime:g}(\.0)?s-', b):
+            return False
+        return True
+
+    for f in sorted(glob.glob(os.path.join(tdir, f'{kind}-*.fits'))):
+        if matches(f):
+            return f
+    for f in (pool or []):
+        if matches(f):
+            return f
+    return None
+
+
+def master_pool(root):
+    """every APP master under the data root, for the cross-target fallback"""
+    return sorted(glob.glob(os.path.join(root, '*', 'M*-*.fits')) +
+                  glob.glob(os.path.join(root, '*', 'BPM-*.fits')) +
+                  glob.glob(os.path.join(root, '*', '*', 'M*-*.fits')))
 
 
 def source_mask_frame(d, cell=128, nsig=3.0, grow=8):
@@ -439,23 +420,76 @@ def main():
     sys.stdout.reconfigure(line_buffering=True)
     log = print
 
-    print(f'selecting {a.filter} frames:')
-    files = collect(a.targets, a.filter, a.per_target, True)
-    if not files:
+    print(f'looking for {a.filter} frames:')
+    cands = collect(a.targets, a.filter)
+    if not cands:
         sys.exit('no frames found')
+    allfiles = [f for fs, _ in cands.values() for f in fs]
+    print(f'  {len(allfiles)} candidates in {len(cands)} targets, reading headers')
 
-    # --- header pass: equipment key, clocking, pier, altitude, night
-    info = {}
-    for f in files:
+    def head(f):
         h = fits.getheader(f)
-        info[f] = dict(key=equip_key(h), clock=clocking(h), pier=str(h.get('PIERSIDE', '?')),
+        return f, dict(key=equip_key(h), clock=clocking(h), pier=str(h.get('PIERSIDE', '?')),
                        alt=h.get('OBJCTALT'), exp=float(h.get('EXPTIME', 0)),
-                       gain=float(h.get('GAIN', 0)), dims=f"{h.get('NAXIS1')}x{h.get('NAXIS2')}",
+                       gain=float(h.get('GAIN', 0)),
+                       dims=f"{h.get('NAXIS1')}x{h.get('NAXIS2')}",
                        night=str(h.get('DATE-OBS'))[:10], cam=str(h.get('INSTRUME')))
+
+    with cf.ThreadPoolExecutor(a.threads) as ex:
+        info = dict(ex.map(head, allfiles))
+
+    keys = Counter(v['key'] for v in info.values())
+    key = keys.most_common(1)[0][0]
+    if len(keys) > 1:
+        print('  equipment present: ' + ', '.join(f'{k} x{v}' for k, v in keys.most_common()))
+    clocks = [v['clock'] for v in info.values() if v['key'] == key and v['clock'] is not None]
+    ref = float(np.median(clocks)) if clocks else None
+
+    def why_not(f):
+        v = info[f]
+        if v['key'] != key:
+            return 'equipment'
+        if ref is not None and v['clock'] is not None and abs(v['clock'] - ref) > a.clock_tol:
+            return 'clocking'
+        if a.pier != 'all' and not v['pier'].lower().startswith(a.pier[0]):
+            return 'pier'
+        if a.alt_range and not (a.alt_range[0] <= float(v['alt'] or -99) <= a.alt_range[1]):
+            return 'altitude'
+        if a.since and v['night'] < a.since:
+            return 'date'
+        if a.until and v['night'] > a.until:
+            return 'date'
+        return None
+
+    print(f'\nselecting: equipment {key}' +
+          (f', clocking {ref:.2f} +/- {a.clock_tol} deg' if ref is not None else ''))
+    drop, sel, usable = Counter(), [], []
+    for tdir, (fs, had_keep) in sorted(cands.items()):
+        ok = []
+        for f in fs:
+            w = why_not(f)
+            drop[w] += 1 if w else 0
+            if not w:
+                ok.append(f)
+        picked, nights = spread_over_nights(ok, a.per_target)
+        sel += picked
+        usable += ok
+        print(f'  {os.path.basename(tdir):12} {len(picked):4} of {len(ok):5} usable'
+              f' over {nights:2} nights'
+              + (f'   ({len(fs) - len(ok)} dropped)' if len(fs) != len(ok) else '')
+              + ('  (keep list applied)' if had_keep else ''))
+    if sum(drop.values()):
+        print('  dropped: ' + ', '.join(f'{k} {v}' for k, v in drop.items() if k))
+    print(f'selected {len(sel)} frames from {len({info[f]["night"] for f in sel})} nights, '
+          f'pier ' + ', '.join(f'{k}:{v}' for k, v in
+                               Counter(info[f]['pier'][0] for f in sel).items()))
+    if len(sel) < a.min_frames:
+        sys.exit(f'only {len(sel)} frames, below --min-frames {a.min_frames}')
+
     if not a.no_dither_check:
         print('\nactual dither (star-field shift between consecutive subs of one night):')
-        for t in sorted({f.split('/Light')[0] for f in files}):
-            steps = measure_dither([f for f in files if f.startswith(t)])
+        for t in sorted({f.split('/Light')[0] for f in sel}):
+            steps = measure_dither([f for f in usable if f.startswith(t)])
             if steps is None:
                 print(f'  {os.path.basename(t):12} too few consecutive frames to tell')
                 continue
@@ -463,37 +497,6 @@ def main():
             print(f'  {os.path.basename(t):12} {len(moved)}/{len(steps)} steps moved, '
                   f'typical move {np.median(moved) if moved else 0:.1f} px'
                   + ('' if moved else '   (no dither in this sample)'))
-
-    keys = Counter(v['key'] for v in info.values())
-    key = keys.most_common(1)[0][0]
-    if len(keys) > 1:
-        print(f'\nequipment keys found: {dict(keys)}\n  keeping {key}, dropping the rest')
-    clocks = [v['clock'] for v in info.values() if v['key'] == key and v['clock'] is not None]
-    ref = float(np.median(clocks)) if clocks else None
-    sel = []
-    drop = Counter()
-    for f, v in info.items():
-        if v['key'] != key:
-            drop['equipment'] += 1; continue
-        if ref is not None and v['clock'] is not None and abs(v['clock'] - ref) > a.clock_tol:
-            drop['clocking'] += 1; continue
-        if a.pier != 'all' and not v['pier'].lower().startswith(a.pier[0]):
-            drop['pier'] += 1; continue
-        if a.alt_range and not (a.alt_range[0] <= float(v['alt'] or -99) <= a.alt_range[1]):
-            drop['altitude'] += 1; continue
-        if a.since and v['night'] < a.since:
-            drop['date'] += 1; continue
-        if a.until and v['night'] > a.until:
-            drop['date'] += 1; continue
-        sel.append(f)
-    print(f'\nequipment  {key}   clocking {ref:.2f} deg +/- {a.clock_tol}' if ref else key)
-    if drop:
-        print('dropped: ' + ', '.join(f'{k} {v}' for k, v in drop.items()))
-    print(f'selected {len(sel)} frames from {len({info[f]["night"] for f in sel})} nights, '
-          f'pier ' + ', '.join(f'{k}:{v}' for k, v in
-                               Counter(info[f]['pier'][0] for f in sel).items()))
-    if len(sel) < a.min_frames:
-        sys.exit(f'only {len(sel)} frames, below --min-frames {a.min_frames}')
 
     # --- master dark and bad pixel map, per (target, exposure)
     groups = defaultdict(list)
@@ -503,12 +506,15 @@ def main():
     print('\ncalibration:')
     usable, darks = [], {}
     cam_dims = None
+    pool = master_pool(DATA_ROOT)
     for (tdir, exp, gain, dims), fs in sorted(groups.items()):
         cam = slug(info[fs[0]]['cam']).replace('ZWO_CCD_', '')
         cam_dims = f'{cam}-{dims}'
-        md = find_master(tdir, 'MD', cam_dims, gain, exp)
+        md = find_master(tdir, 'MD', cam_dims, gain, exp, pool)
+        borrowed = '' if not md or md.startswith(tdir) else \
+            f' (borrowed from {os.path.basename(os.path.dirname(md))})'
         print(f'  {os.path.basename(tdir):12} {len(fs):4} frames  {exp:g}s gain{gain:g} {dims}'
-              f'  dark: {os.path.basename(md) if md else "NOT FOUND - skipped"}')
+              f'  dark: {os.path.basename(md) if md else "NOT FOUND - skipped"}{borrowed}')
         if md:
             darks[(tdir, exp)] = md
             usable += fs
@@ -517,7 +523,7 @@ def main():
         sys.exit('no frames with a matching master dark')
     bpm_path = None
     for tdir in {f.split('/Light')[0] for f in sel}:
-        bpm_path = bpm_path or find_master(tdir, 'BPM', cam_dims)
+        bpm_path = bpm_path or find_master(tdir, 'BPM', cam_dims, pool=pool)
     print(f'  bad pixel map: {os.path.basename(bpm_path) if bpm_path else "none found"}')
 
     if not a.write:
