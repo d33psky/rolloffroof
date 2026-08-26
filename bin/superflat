@@ -69,6 +69,7 @@ EXAMPLES
 
 import argparse
 import glob
+import concurrent.futures as cf
 import os
 import re
 import sys
@@ -295,8 +296,12 @@ def combine(raw):
     band = band / CUBE_SCALE + 1.0
     with np.errstate(invalid='ignore'):
         med = np.nanmedian(band, axis=0)
-        mad = np.nanmedian(np.abs(band - med), axis=0) * 1.4826
-        band[band > med + 2.5 * np.maximum(mad, 1e-6)] = np.nan
+        # sigma from a subsample rather than a per-pixel MAD: the sky noise
+        # varies slowly across the sensor, and the per-pixel version needs a
+        # second full-size nanmedian plus a full-size temporary
+        samp = np.abs(band[::3, ::4, ::4] - med[::4, ::4])
+        sig = float(np.nanmedian(samp) * 1.4826) if np.isfinite(samp).any() else 0.0
+        band[band > med + 2.5 * max(sig, 1e-6)] = np.nan
         out = np.nanmedian(band, axis=0)
     count = np.count_nonzero(np.isfinite(band), axis=0)
     return out, count
@@ -384,6 +389,9 @@ def main():
     ap.add_argument('--clock-tol', type=float, default=1.5, metavar='DEG',
                     help='allowed spread in camera clocking (CROTA2 mod 180) around the '
                          'most common value (default 1.5)')
+    ap.add_argument('--threads', type=int, default=max(1, (os.cpu_count() or 2) - 1),
+                    metavar='N', help='worker threads (numpy releases the GIL for the median '
+                                      'and the filters, so threads really do help)')
     ap.add_argument('--min-frames', type=int, default=50, metavar='N',
                     help='refuse to build from fewer than N frames (default 50)')
     ap.add_argument('--no-dither-check', action='store_true',
@@ -514,31 +522,42 @@ def main():
         print(f'  cube on disk: {cube_path} ({need / 1e9:.1f} GB, removed afterwards; '
               f'only {avail / 1e9:.1f} GB RAM available)')
         cube = np.memmap(cube_path, np.int16, 'w+', shape=(len(sel), H, W))
-    scales, keep, n, maskfrac = [], [], 0, []
-    for f in sel:
-        tdir, exp = f.split('/Light')[0], info[f]['exp']
-        dp = darks[(tdir, exp)]
+    for (tdir, exp), dp in darks.items():          # preload: threads must not race
         if dp not in dark_cache:
             dark_cache[dp] = fits.getdata(dp).astype(np.float32)
+
+    def prepare(item):
+        """read one frame, normalise it, mask its sources, park it in the cube"""
+        i, f = item
+        dp = darks[(f.split('/Light')[0], info[f]['exp'])]
         d = fits.getdata(f).astype(np.float32) - dark_cache[dp]
         med, coef = frame_scale_and_plane(d, None)
         if med <= 0:
-            print(f'  skipped (no sky level): {os.path.basename(f)}', file=sys.stderr)
-            continue
+            return i, None, None
         d /= med
         d -= plane_image(coef, (H, W)) / med
         d += 1.0
         m = source_mask_frame(d)
-        maskfrac.append(float(m.mean()))
         v = np.clip((d - 1.0) * CUBE_SCALE, -30000, 30000).astype(np.int16)
         v[m] = MASKED
-        cube[n] = v
-        scales.append(med); keep.append(f); n += 1
-        if n % 25 == 0:
-            print(f'  {n}/{len(sel)}  (last frame masked {100 * maskfrac[-1]:.1f}%)')
+        cube[i] = v
+        return i, med, float(m.mean())
+
+    scales, keep, maskfrac, valid = [], [], [], []
+    done = 0
+    with cf.ThreadPoolExecutor(a.threads) as ex:
+        for i, med, mf in ex.map(prepare, enumerate(sel)):
+            done += 1
+            if med is None:
+                print(f'  skipped (no sky level): {os.path.basename(sel[i])}', file=sys.stderr)
+                continue
+            valid.append(i); scales.append(med); maskfrac.append(mf); keep.append(sel[i])
+            if done % 50 == 0:
+                print(f'  {done}/{len(sel)}  (last frame masked {100 * mf:.1f}%)')
+    valid = np.array(sorted(valid))
+    n = len(valid)
     if cube_path:
         cube.flush()
-    cube = cube[:n]
     print(f'  {n} frames, sky levels {np.min(scales):.1f} .. {np.max(scales):.1f} ADU '
           f'(median {np.median(scales):.1f})')
     print(f'  per-frame source mask: {100 * np.median(maskfrac):.1f}% of pixels '
@@ -553,13 +572,19 @@ def main():
     def build_set(idx, tag):
         """median over the frames named by idx, in row bands from the cube"""
         print(f'\nbuilding {tag} from {len(idx)} frames:')
-        rows = max(8, int(MASK_BAND / (max(1, len(idx)) * W * 4)))
+        rows = max(8, int(MASK_BAND / (max(1, len(idx)) * W * 4 * a.threads)))
         res = np.zeros((H, W), np.float32)
         cnt = np.zeros((H, W), np.int32)
-        for y0 in range(0, H, rows):
+
+        def do_band(y0):
             y1 = min(H, y0 + rows)
             res[y0:y1], cnt[y0:y1] = combine(cube[idx, y0:y1, :])
-            print(f'  rows {y0:5}..{y1:5} ({100 * y1 // H:3d}%)')
+            return y1
+
+        with cf.ThreadPoolExecutor(a.threads) as ex:
+            for k, y1 in enumerate(ex.map(do_band, range(0, H, rows))):
+                if k % 4 == 0:
+                    print(f'  rows ..{y1:5} ({100 * y1 // H:3d}%)')
         thin = cnt < max(3, len(idx) // 10)
         if thin.any():
             print(f'  thin coverage: {100 * thin.mean():.2f}% of pixels have fewer than '
@@ -572,7 +597,7 @@ def main():
             sys.exit(f'{tag}: the result is constant or not finite - refusing to write it')
         return res
 
-    flat = build_set(np.arange(n), a.name)
+    flat = build_set(valid, a.name)
     meta = dict(EQUIPKEY=key, FILTER=a.filter, NFRAMES=len(keep),
                 NTARGETS=len({f.split('/Light')[0] for f in keep}),
                 CLOCKING=round(ref, 3) if ref else 0, PIER=a.pier,
@@ -581,8 +606,8 @@ def main():
 
     halves = None
     if a.halves:
-        h1 = build_set(np.arange(0, n, 2), a.name + '-half1')
-        h2 = build_set(np.arange(1, n, 2), a.name + '-half2')
+        h1 = build_set(valid[0::2], a.name + '-half1')
+        h2 = build_set(valid[1::2], a.name + '-half2')
         write_out(os.path.join(out_dir, a.name + '-half1.fits'), h1, meta, log)
         write_out(os.path.join(out_dir, a.name + '-half2.fits'), h2, meta, log)
         d = h1 - h2
