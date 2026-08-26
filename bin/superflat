@@ -323,6 +323,27 @@ def load_bpm(path):
     return bad, frac
 
 
+def smooth_fill(img, bad, sigma=30):
+    """Fill masked pixels by normalised convolution: the surrounding values,
+    Gaussian weighted. Nearest-neighbour filling propagates one pixel's value
+    across a whole hole and invents blocky rings - visible in the first 8-target
+    build, where the objects of all targets overlap at the sensor centre."""
+    if not bad.any():
+        return img
+    good = (~bad).astype(np.float32)
+    v = np.where(bad, 0.0, img).astype(np.float32)
+    for sig in (sigma, sigma * 3, sigma * 9):          # widen until every hole is covered
+        num = ndimage.gaussian_filter(v, sig)
+        den = ndimage.gaussian_filter(good, sig)
+        filled = np.where(den > 1e-6, num / np.maximum(den, 1e-6), np.nan)
+        out = np.where(bad, filled, img)
+        if np.isfinite(out).all():
+            return out
+        v = np.where(np.isfinite(out), np.nan_to_num(out), 0.0)
+        good = np.isfinite(out).astype(np.float32)
+    return np.where(np.isfinite(out), out, float(np.nanmedian(img)))
+
+
 def fill_bad(img, bad):
     """replace masked pixels by their surroundings (a hot pixel is at the same
     sensor position in every frame, so the median keeps it)"""
@@ -345,11 +366,11 @@ def write_out(path, data, meta, log):
     log(f'  wrote {path}')
 
 
-def plot(path, flat, halves, log):
+def plot(path, flat, halves, log, cov=None):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    n = 2 + (1 if halves else 0)
+    n = 2 + (1 if halves else 0) + (1 if cov is not None else 0)
     fig, axes = plt.subplots(1, n, figsize=(6.5 * n, 5))
     lo, hi = np.percentile(flat, [0.5, 99.5])
     im = axes[0].imshow(flat, origin='lower', cmap='coolwarm', vmin=lo, vmax=hi)
@@ -364,6 +385,11 @@ def plot(path, flat, halves, log):
         im = axes[2].imshow(d, origin='lower', cmap='coolwarm', vmin=-0.002, vmax=0.002)
         plt.colorbar(im, ax=axes[2], fraction=0.03)
         axes[2].set_title(f'half1 - half2  (rms {d.std():.5f})')
+    if cov is not None:
+        im = axes[n - 1].imshow(cov, origin='lower', cmap='viridis')
+        plt.colorbar(im, ax=axes[n - 1], fraction=0.03)
+        axes[n - 1].set_title(f'frames per pixel (min {int(cov.min())}) - the centre is where '
+                              f'every target sits', fontsize=9)
     for a in axes:
         a.set_xticks([]); a.set_yticks([])
     plt.tight_layout(); plt.savefig(path, dpi=95)
@@ -569,6 +595,8 @@ def main():
         print(f'  bad pixel map: {100 * bpm_frac:.2f}% of pixels masked and interpolated')
     out_dir = os.path.join(a.out_root, key, a.filter)
 
+    coverage = {}
+
     def build_set(idx, tag):
         """median over the frames named by idx, in row bands from the cube"""
         print(f'\nbuilding {tag} from {len(idx)} frames:')
@@ -585,13 +613,18 @@ def main():
             for k, y1 in enumerate(ex.map(do_band, range(0, H, rows))):
                 if k % 4 == 0:
                     print(f'  rows ..{y1:5} ({100 * y1 // H:3d}%)')
-        thin = cnt < max(3, len(idx) // 10)
+        floor = max(3, len(idx) // 10)
+        thin = (cnt < floor) | ~np.isfinite(res)
         if thin.any():
+            lab, nlab = ndimage.label(thin)
+            big = max(ndimage.sum(thin, lab, range(1, nlab + 1))) if nlab else 0
             print(f'  thin coverage: {100 * thin.mean():.2f}% of pixels have fewer than '
-                  f'{max(3, len(idx) // 10)} frames (min {cnt.min()}) - interpolated')
-            res = fill_bad(res, thin | ~np.isfinite(res))
+                  f'{floor} frames (min {cnt.min()}); largest patch {int(big)} px '
+                  f'- filled by smooth interpolation, NOT measured')
+            res = smooth_fill(res, thin)
         if bpm is not None:
-            res = fill_bad(res, bpm)
+            res = smooth_fill(res, bpm, sigma=3)
+        coverage[tag] = cnt
         res = res / float(np.mean(res))
         if not np.isfinite(res).all() or res.std() == 0:
             sys.exit(f'{tag}: the result is constant or not finite - refusing to write it')
@@ -603,6 +636,8 @@ def main():
                 CLOCKING=round(ref, 3) if ref else 0, PIER=a.pier,
                 NIGHTS=len({info[f]['night'] for f in keep}))
     write_out(os.path.join(out_dir, a.name + '.fits'), flat, meta, log)
+    write_out(os.path.join(out_dir, a.name + '-coverage.fits'),
+              coverage[a.name].astype(np.float32), meta, log)
 
     halves = None
     if a.halves:
@@ -618,7 +653,8 @@ def main():
               f'{flat.std() / d.std():.1f}x')
         halves = (h1, h2)
     if a.plot:
-        plot(os.path.join(out_dir, a.name + '.png'), flat, halves, log)
+        plot(os.path.join(out_dir, a.name + '.png'), flat, halves, log,
+             coverage.get(a.name))
     del cube
     if cube_path:
         os.unlink(cube_path)
