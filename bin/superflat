@@ -1,0 +1,531 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["numpy", "astropy", "scipy", "matplotlib"]
+# ///
+"""superflat - build a night-sky flat from the science sub exposures themselves.
+
+A panel flat is lit by a panel, not by the sky, so it gets the large-scale
+illumination of the real light path wrong - which is where the rings, the
+central hole and the vignetting mismatch come from. The sky itself is the only
+light source that follows the true path, and every light frame is a picture of
+it. Combine enough frames and the sky is all that is left.
+
+WHAT IT DOES
+  Takes RAW subs (as KStars writes them), in raw sensor geometry - no
+  registration, no alignment, no plate solving. Per frame:
+    1. subtract the matching master dark (removes bias + dark structure, which
+       are additive and would otherwise be read as response)
+    2. mask the bad pixels from the BPM (a hot pixel sits at the same sensor
+       pixel in every frame, so no amount of dithering removes it)
+    3. divide by the frame's own sky level, so 60 s and 300 s frames and bright
+       and dark nights all carry the same weight
+    4. subtract a fitted plane and add 1 back: moonlight and light-pollution
+       gradients are linear over a 48 arcmin field and would average into the
+       flat, while vignetting, rings and the hole are not linear and survive
+  and then combines the frames pixel by pixel with a median that also rejects
+  the high side (stars are only ever too bright, never too faint).
+
+  Frames MUST come from several different targets, and in roughly equal shares.
+  That is what removes the objects, NOT dithering: with N targets contributing
+  equally, a star of one target sits on its sensor pixel in only 1/N of the
+  frames, which a median absorbs for N >= 3. Dithering helps on top of that by
+  smearing each target's own stars over a few tens of pixels, but it is not
+  required and has not always worked - the real dither is measured during
+  selection, by cross correlating consecutive subs, so you can see which
+  sessions actually dithered.
+
+EQUIPMENT KEY (checked, never assumed)
+  Only frames sharing camera, focal length, binning and camera clocking can go
+  into one superflat. Clocking is CROTA2 mod 180: on an equatorial mount the
+  sky orientation on the sensor does not depend on the target, so that angle is
+  the camera's rotation in the optical train. Frames outside --clock-tol of the
+  reference are dropped (the train was re-clocked in Nov/Dec 2025: everything
+  before sits near 86-91 deg, everything after near 74 deg).
+  Pier side is NOT a key by default: in sensor coordinates the optics do not
+  rotate, only the sky does, so mixing east and west frames actually cancels
+  the sky better. Use --pier to build one side only, as a diagnostic of whether
+  the signature itself moves with the flip.
+
+USING THE RESULT
+  The output has the geometry of a sub, so it can go straight into APP as a
+  master flat. The sound recipe combines both flats by scale:
+      master = large_scale(superflat) x [panel / large_scale(panel)]
+  small scale (pixel response, sharp dust) from the panel flat, illumination
+  from the sky. --illum writes that combination when a panel flat is given.
+
+VALIDATION
+  --halves builds two superflats from disjoint halves of the frames and reports
+  how much they differ. That is the honest measure of whether the signature is
+  stable: if the halves disagree, no single flat can be right, and the split
+  can then be narrowed down with --pier, --since/--until or --alt-range.
+
+EXAMPLES
+  superflat NGC_6285 NGC_6043 NGC_4205 NGC_5907 M_86 --filter Lum
+  superflat NGC_6285 NGC_6043 NGC_4205 --filter Lum --write --halves --plot
+  superflat NGC_6285 NGC_6043 --filter Lum --pier east --write --name east
+  superflat NGC_6285 --filter Lum --alt-range 20 45 --write --name lowalt
+"""
+
+import argparse
+import glob
+import os
+import re
+import sys
+from collections import defaultdict, Counter
+from datetime import datetime
+
+import numpy as np
+from astropy.io import fits
+from scipy import ndimage
+
+DATA_ROOT = os.path.expanduser('~/astro/data')
+OUT_ROOT = os.path.expanduser('~/astro/superflat')
+FITS_EXT = ('.fits', '.fit', '.fts')
+# filter directory names differ per session (Lum / Luminance, Ha / Hydrogen-alpha)
+FILTER_ALIAS = {'lum': ('lum', 'luminance', 'l'), 'red': ('red', 'r'),
+                'green': ('green', 'g'), 'blue': ('blue', 'b'),
+                'ha': ('ha', 'halpha', 'h-alpha', 'hydrogen-alpha'),
+                'oiii': ('oiii', 'o3'), 'sii': ('sii', 's2')}
+MASK_BAND = 400e6           # bytes of frame data held at once
+
+
+def slug(s):
+    return re.sub(r'[^A-Za-z0-9]+', '_', str(s)).strip('_')
+
+
+def equip_key(h):
+    """camera-focallen-binning, from the header"""
+    cam = slug(h.get('INSTRUME', 'unknown')).replace('ZWO_CCD_', '')
+    return f"{cam}-fl{int(round(float(h.get('FOCALLEN', 0))))}-bin{h.get('XBINNING', '?')}"
+
+
+def clocking(h):
+    """camera rotation in the optical train = CROTA2 mod 180 (equatorial mount:
+    the sky orientation on the sensor does not depend on the target)"""
+    r = h.get('CROTA2')
+    return float(r) % 180 if r is not None else None
+
+
+def filter_dirs(light_dir, want):
+    names = FILTER_ALIAS.get(want.lower(), (want.lower(),))
+    out = []
+    for d in sorted(glob.glob(light_dir + '/*')):
+        if os.path.isdir(d) and os.path.basename(d).lower() in names:
+            out.append(d)
+    return out
+
+
+def keep_list(target):
+    """basenames sort-subs called good, if --write was ever run on this object"""
+    p = os.path.join(target, 'sub-metrics-verdicts', 'keep.txt')
+    if not os.path.exists(p):
+        return None
+    with open(p) as fh:
+        return {os.path.basename(l.strip()) for l in fh if l.strip()}
+
+
+def collect(targets, filt, per_target, verbose):
+    """candidate frames per target: only from Light/ (never Light_rejected/),
+    restricted to sort-subs' keep list when there is one, spread over nights"""
+    out = []
+    for t in targets:
+        tdir = t if os.path.isdir(t) else os.path.join(DATA_ROOT, t)
+        if not os.path.isdir(tdir):
+            print(f'  {t}: not a directory, skipped', file=sys.stderr)
+            continue
+        keep = keep_list(tdir)
+        files = []
+        for light in sorted(glob.glob(tdir + '/Light')) + sorted(glob.glob(tdir + '/*/Light')):
+            for fd in filter_dirs(light, filt):
+                for f in sorted(os.listdir(fd)):
+                    if not f.lower().endswith(FITS_EXT):
+                        continue
+                    if keep is not None and f not in keep:
+                        continue
+                    files.append(os.path.join(fd, f))
+        if not files:
+            print(f'  {tdir}: no {filt} frames', file=sys.stderr)
+            continue
+        by_night = defaultdict(list)
+        for f in files:
+            m = re.search(r'(\d{4}-\d{2}-\d{2})T', os.path.basename(f))
+            by_night[m.group(1) if m else '?'].append(f)
+        picked, nights = [], sorted(by_night)
+        i = 0
+        while len(picked) < per_target and any(by_night.values()):   # round robin over nights
+            n = nights[i % len(nights)]
+            if by_night[n]:
+                step = max(1, len(by_night[n]) // 40)
+                picked.append(by_night[n].pop(len(by_night[n]) // 2 if step == 1 else 0))
+            i += 1
+            if i > 100000:
+                break
+        out += picked
+        if verbose:
+            print(f'  {os.path.basename(tdir):12} {len(picked):4} of {len(files)} frames'
+                  f' over {len(nights)} nights'
+                  + ('' if keep is None else '  (sort-subs keep list applied)'))
+    return out
+
+
+def find_master(tdir, kind, cam_dims, gain=None, exptime=None):
+    """APP master frames sit in the target dir:
+       MD-IG_<gain>-E<exp>s-<cam>-<w>x<h>.fits, BPM-<cam>-<w>x<h>.fits"""
+    for f in sorted(glob.glob(os.path.join(tdir, f'{kind}-*.fits'))):
+        b = os.path.basename(f)
+        if cam_dims not in b:
+            continue
+        if gain is not None and f'IG_{gain:.1f}' not in b:
+            continue
+        if exptime is not None and not re.search(rf'-E{exptime:g}(\.0)?s-', b):
+            continue
+        return f
+    return None
+
+
+def star_map(a):
+    hp = a - ndimage.median_filter(a, 7)
+    sig = float(np.median(np.abs(hp)) * 1.4826)
+    return np.clip(hp / max(sig, 1e-6) - 4, 0, 30)
+
+
+def measure_dither(files, n=16):
+    """Real dither, in pixels: the star field shift between consecutive subs of
+    one night, by FFT cross correlation. NOT from CRVAL - that is the mount's
+    reported pointing, which shows the offsets that were commanded, not the ones
+    the guider actually let happen (measured 2026-08-26: three targets reported
+    dither steps while their stars never moved)."""
+    by_night = defaultdict(list)
+    for f in files:
+        m = re.search(r'(\d{4}-\d{2}-\d{2})T', os.path.basename(f))
+        by_night[m.group(1) if m else '?'].append(f)
+    night = max(by_night, key=lambda k: len(by_night[k]))
+    # consecutive frames of that night, taken from the directory itself: the
+    # superflat's own selection is spread out and would miss a dither that only
+    # happens every few frames
+    d = os.path.dirname(by_night[night][0])
+    fs = sorted(f for f in glob.glob(d + '/*')
+                if os.path.basename(f).startswith(night) and f.lower().endswith(FITS_EXT))
+    fs = fs[len(fs) // 3:][:n]
+    if len(fs) < 4:
+        return None
+    steps, prev = [], None
+    for f in fs:
+        sm = star_map(fits.getdata(f).astype(np.float32))
+        if prev is not None:
+            A, B = np.fft.rfft2(sm), np.fft.rfft2(prev)
+            r = np.fft.irfft2(A * np.conj(B), s=sm.shape)
+            dy, dx = np.unravel_index(np.argmax(r), r.shape)
+            dy -= sm.shape[0] if dy > sm.shape[0] // 2 else 0
+            dx -= sm.shape[1] if dx > sm.shape[1] // 2 else 0
+            steps.append(float(np.hypot(dx, dy)))
+        prev = sm
+    return steps
+
+
+def frame_scale_and_plane(d, valid):
+    """sky level and the linear gradient of one dark-subtracted frame, both from
+    a subsample of the faint pixels (objects excluded)"""
+    sub = d[::7, ::7]
+    v = sub[np.isfinite(sub)]
+    med = float(np.median(v))
+    sig = float(np.median(np.abs(v - med)) * 1.4826)
+    ys, xs = np.nonzero((sub < med + 2 * sig) & (sub > med - 5 * sig))
+    z = sub[ys, xs]
+    H, W = d.shape
+    xn = (xs * 7 - W / 2) / W
+    yn = (ys * 7 - H / 2) / H
+    A = np.stack([np.ones_like(xn, float), xn, yn], axis=1)
+    coef, *_ = np.linalg.lstsq(A, z, rcond=None)
+    return med, coef
+
+
+def plane_image(coef, shape):
+    H, W = shape
+    y, x = np.mgrid[0:H, 0:W]
+    xn = (x - W / 2) / W
+    yn = (y - H / 2) / H
+    return coef[0] + coef[1] * xn + coef[2] * yn
+
+
+def build(files, dark, bpm, scales, planes, log):
+    """pixel-wise median over the normalised, plane-flattened frames, in row
+    bands so that memory stays bounded"""
+    H, W = dark.shape
+    rows = max(8, int(MASK_BAND / (len(files) * W * 4)))
+    out = np.zeros((H, W), np.float32)
+    for y0 in range(0, H, rows):
+        y1 = min(H, y0 + rows)
+        band = np.empty((len(files), y1 - y0, W), np.float32)
+        for i, f in enumerate(files):
+            with fits.open(f, memmap=True) as hd:
+                d = np.asarray(hd[0].section[y0:y1], np.float32)
+            d -= dark[y0:y1]
+            d /= scales[i]
+            d -= plane_image(planes[i], (H, W))[y0:y1] / scales[i]
+            band[i] = d + 1.0
+        out[y0:y1] = combine(band)
+        log(f'  rows {y0:5}..{y1:5}  ({100 * y1 // H:3d}%)')
+        del band
+    if bpm is not None:
+        out = fill_bad(out, bpm)
+    return out / float(np.mean(out[np.isfinite(out)]))
+
+
+def combine(band):
+    """per-pixel median with the high side clipped away. Objects only ever add
+    light, so rejection is deliberately asymmetric: a star that sits on the same
+    sensor pixel in every frame of one target (no dither) still only pollutes
+    1/N of the frames, and this removes its wings as well."""
+    med = np.median(band, axis=0)
+    mad = np.median(np.abs(band - med), axis=0) * 1.4826
+    hi = med + 2.5 * np.maximum(mad, 1e-6)
+    masked = np.where(band <= hi, band, np.nan)
+    with np.errstate(invalid='ignore'):
+        out = np.nanmedian(masked, axis=0)
+    return np.where(np.isfinite(out), out, med)
+
+
+def fill_bad(img, bad):
+    """replace masked pixels by their surroundings (a hot pixel is at the same
+    sensor position in every frame, so the median keeps it)"""
+    if not bad.any():
+        return img
+    idx = ndimage.distance_transform_edt(bad, return_distances=False, return_indices=True)
+    return img[tuple(idx)]
+
+
+def write_out(path, data, meta, log):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    h = fits.Header()
+    for k, v in meta.items():
+        h[k[:8].upper()] = v
+    hdu = fits.PrimaryHDU(data.astype(np.float32), h)
+    hdu.header.add_history(f'superflat {datetime.now():%Y-%m-%d %H:%M}')
+    for k, v in meta.items():
+        hdu.header.add_history(f'  {k} = {v}')
+    hdu.writeto(path, overwrite=True)
+    log(f'  wrote {path}')
+
+
+def plot(path, flat, halves, log):
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    n = 2 + (1 if halves else 0)
+    fig, axes = plt.subplots(1, n, figsize=(6.5 * n, 5))
+    lo, hi = np.percentile(flat, [0.5, 99.5])
+    im = axes[0].imshow(flat, origin='lower', cmap='coolwarm', vmin=lo, vmax=hi)
+    plt.colorbar(im, ax=axes[0], fraction=0.03)
+    axes[0].set_title(f'superflat  ({100 * (hi - lo):.2f}% p-t-p shown)')
+    sm = ndimage.gaussian_filter(flat, 40)
+    im = axes[1].imshow(flat - sm, origin='lower', cmap='coolwarm', vmin=-0.002, vmax=0.002)
+    plt.colorbar(im, ax=axes[1], fraction=0.03)
+    axes[1].set_title('fine structure (flat - 40px smooth)')
+    if halves:
+        d = halves[0] - halves[1]
+        im = axes[2].imshow(d, origin='lower', cmap='coolwarm', vmin=-0.002, vmax=0.002)
+        plt.colorbar(im, ax=axes[2], fraction=0.03)
+        axes[2].set_title(f'half1 - half2  (rms {d.std():.5f})')
+    for a in axes:
+        a.set_xticks([]); a.set_yticks([])
+    plt.tight_layout(); plt.savefig(path, dpi=95)
+    log(f'  plot: {path}')
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('targets', nargs='+', help='target directories (names under '
+                                               f'{DATA_ROOT} or paths)')
+    ap.add_argument('--filter', default='Lum', help='filter to build for (default Lum)')
+    ap.add_argument('--per-target', type=int, default=200, metavar='N',
+                    help='at most N frames per target, spread over its nights (default 200)')
+    ap.add_argument('--pier', choices=['all', 'east', 'west'], default='all',
+                    help='restrict to one side of the meridian (default all: in sensor '
+                         'coordinates mixing them cancels the sky better)')
+    ap.add_argument('--alt-range', nargs=2, type=float, metavar=('LO', 'HI'),
+                    help='only frames with OBJCTALT in this range, to test whether the '
+                         'signature moves with altitude (flexure)')
+    ap.add_argument('--since', metavar='YYYY-MM-DD', help='only frames from this date on')
+    ap.add_argument('--until', metavar='YYYY-MM-DD', help='only frames up to this date')
+    ap.add_argument('--clock-tol', type=float, default=1.5, metavar='DEG',
+                    help='allowed spread in camera clocking (CROTA2 mod 180) around the '
+                         'most common value (default 1.5)')
+    ap.add_argument('--min-frames', type=int, default=50, metavar='N',
+                    help='refuse to build from fewer than N frames (default 50)')
+    ap.add_argument('--no-dither-check', action='store_true',
+                    help='skip the dither measurement (it reads ~10 frames per target)')
+    ap.add_argument('--halves', action='store_true',
+                    help='also build two superflats from disjoint halves and report their '
+                         'difference: the stability check')
+    ap.add_argument('--name', default='all', metavar='NAME',
+                    help='output basename under <out-root>/<equipment>/<filter>/ (default all)')
+    ap.add_argument('--out-root', default=OUT_ROOT, metavar='DIR')
+    ap.add_argument('--write', action='store_true',
+                    help='write the FITS (default: select, report and stop)')
+    ap.add_argument('--plot', action='store_true', help='write a diagnostics PNG')
+    a = ap.parse_args()
+    sys.stdout.reconfigure(line_buffering=True)
+    log = print
+
+    print(f'selecting {a.filter} frames:')
+    files = collect(a.targets, a.filter, a.per_target, True)
+    if not files:
+        sys.exit('no frames found')
+
+    # --- header pass: equipment key, clocking, pier, altitude, night
+    info = {}
+    for f in files:
+        h = fits.getheader(f)
+        info[f] = dict(key=equip_key(h), clock=clocking(h), pier=str(h.get('PIERSIDE', '?')),
+                       alt=h.get('OBJCTALT'), exp=float(h.get('EXPTIME', 0)),
+                       gain=float(h.get('GAIN', 0)), dims=f"{h.get('NAXIS1')}x{h.get('NAXIS2')}",
+                       night=str(h.get('DATE-OBS'))[:10], cam=str(h.get('INSTRUME')))
+    if not a.no_dither_check:
+        print('\nactual dither (star-field shift between consecutive subs of one night):')
+        for t in sorted({f.split('/Light')[0] for f in files}):
+            steps = measure_dither([f for f in files if f.startswith(t)])
+            if steps is None:
+                print(f'  {os.path.basename(t):12} too few consecutive frames to tell')
+                continue
+            moved = [v for v in steps if v >= 2]
+            print(f'  {os.path.basename(t):12} {len(moved)}/{len(steps)} steps moved, '
+                  f'typical move {np.median(moved) if moved else 0:.1f} px'
+                  + ('' if moved else '   (no dither in this sample)'))
+
+    keys = Counter(v['key'] for v in info.values())
+    key = keys.most_common(1)[0][0]
+    if len(keys) > 1:
+        print(f'\nequipment keys found: {dict(keys)}\n  keeping {key}, dropping the rest')
+    clocks = [v['clock'] for v in info.values() if v['key'] == key and v['clock'] is not None]
+    ref = float(np.median(clocks)) if clocks else None
+    sel = []
+    drop = Counter()
+    for f, v in info.items():
+        if v['key'] != key:
+            drop['equipment'] += 1; continue
+        if ref is not None and v['clock'] is not None and abs(v['clock'] - ref) > a.clock_tol:
+            drop['clocking'] += 1; continue
+        if a.pier != 'all' and not v['pier'].lower().startswith(a.pier[0]):
+            drop['pier'] += 1; continue
+        if a.alt_range and not (a.alt_range[0] <= float(v['alt'] or -99) <= a.alt_range[1]):
+            drop['altitude'] += 1; continue
+        if a.since and v['night'] < a.since:
+            drop['date'] += 1; continue
+        if a.until and v['night'] > a.until:
+            drop['date'] += 1; continue
+        sel.append(f)
+    print(f'\nequipment  {key}   clocking {ref:.2f} deg +/- {a.clock_tol}' if ref else key)
+    if drop:
+        print('dropped: ' + ', '.join(f'{k} {v}' for k, v in drop.items()))
+    print(f'selected {len(sel)} frames from {len({info[f]["night"] for f in sel})} nights, '
+          f'pier ' + ', '.join(f'{k}:{v}' for k, v in
+                               Counter(info[f]['pier'][0] for f in sel).items()))
+    if len(sel) < a.min_frames:
+        sys.exit(f'only {len(sel)} frames, below --min-frames {a.min_frames}')
+
+    # --- master dark and bad pixel map, per (target, exposure)
+    groups = defaultdict(list)
+    for f in sel:
+        tdir = f.split('/Light')[0]
+        groups[(tdir, info[f]['exp'], info[f]['gain'], info[f]['dims'])].append(f)
+    print('\ncalibration:')
+    usable, darks = [], {}
+    cam_dims = None
+    for (tdir, exp, gain, dims), fs in sorted(groups.items()):
+        cam = slug(info[fs[0]]['cam']).replace('ZWO_CCD_', '')
+        cam_dims = f'{cam}-{dims}'
+        md = find_master(tdir, 'MD', cam_dims, gain, exp)
+        print(f'  {os.path.basename(tdir):12} {len(fs):4} frames  {exp:g}s gain{gain:g} {dims}'
+              f'  dark: {os.path.basename(md) if md else "NOT FOUND - skipped"}')
+        if md:
+            darks[(tdir, exp)] = md
+            usable += fs
+    sel = usable
+    if not sel:
+        sys.exit('no frames with a matching master dark')
+    bpm_path = None
+    for tdir in {f.split('/Light')[0] for f in sel}:
+        bpm_path = bpm_path or find_master(tdir, 'BPM', cam_dims)
+    print(f'  bad pixel map: {os.path.basename(bpm_path) if bpm_path else "none found"}')
+
+    if not a.write:
+        print('\n(dry run - use --write to build the superflat)')
+        return
+
+    # --- per frame: sky level and gradient
+    print('\nmeasuring frames:')
+    dark_cache = {}
+    scales, planes, keep = [], [], []
+    for i, f in enumerate(sel):
+        tdir, exp = f.split('/Light')[0], info[f]['exp']
+        dp = darks[(tdir, exp)]
+        if dp not in dark_cache:
+            dark_cache[dp] = fits.getdata(dp).astype(np.float32)
+        d = fits.getdata(f).astype(np.float32) - dark_cache[dp]
+        med, coef = frame_scale_and_plane(d, None)
+        if med <= 0:
+            continue
+        scales.append(med); planes.append(coef); keep.append(f)
+        if (i + 1) % 50 == 0:
+            print(f'  {i + 1}/{len(sel)}')
+    print(f'  sky levels {np.min(scales):.1f} .. {np.max(scales):.1f} ADU '
+          f'(median {np.median(scales):.1f})')
+
+    bpm = fits.getdata(bpm_path).astype(bool) if bpm_path else None
+    # one dark per frame, in frame order
+    darkarr = np.zeros_like(dark_cache[next(iter(dark_cache))])
+    out_dir = os.path.join(a.out_root, key, a.filter)
+
+    def build_set(fs, sc, pl, tag):
+        print(f'\nbuilding {tag} from {len(fs)} frames:')
+        # frames can have different darks; subtract inside the band loop
+        H, W = darkarr.shape
+        rows = max(8, int(MASK_BAND / (max(1, len(fs)) * W * 4)))
+        res = np.zeros((H, W), np.float32)
+        for y0 in range(0, H, rows):
+            y1 = min(H, y0 + rows)
+            band = np.empty((len(fs), y1 - y0, W), np.float32)
+            for i, f in enumerate(fs):
+                dp = darks[(f.split('/Light')[0], info[f]['exp'])]
+                with fits.open(f, memmap=True) as hd:
+                    d = np.asarray(hd[0].section[y0:y1], np.float32)
+                d -= dark_cache[dp][y0:y1]
+                d /= sc[i]
+                d -= plane_image(pl[i], (H, W))[y0:y1] / sc[i]
+                band[i] = d + 1.0
+            res[y0:y1] = combine(band)
+            del band
+            print(f'  rows {y0:5}..{y1:5} ({100 * y1 // H:3d}%)')
+        if bpm is not None:
+            res = fill_bad(res, bpm)
+        return res / float(np.mean(res))
+
+    flat = build_set(keep, scales, planes, a.name)
+    meta = dict(EQUIPKEY=key, FILTER=a.filter, NFRAMES=len(keep),
+                NTARGETS=len({f.split('/Light')[0] for f in keep}),
+                CLOCKING=round(ref, 3) if ref else 0, PIER=a.pier,
+                NIGHTS=len({info[f]['night'] for f in keep}))
+    write_out(os.path.join(out_dir, a.name + '.fits'), flat, meta, log)
+
+    halves = None
+    if a.halves:
+        h1 = build_set(keep[0::2], scales[0::2], planes[0::2], a.name + '-half1')
+        h2 = build_set(keep[1::2], scales[1::2], planes[1::2], a.name + '-half2')
+        write_out(os.path.join(out_dir, a.name + '-half1.fits'), h1, meta, log)
+        write_out(os.path.join(out_dir, a.name + '-half2.fits'), h2, meta, log)
+        d = h1 - h2
+        print(f'\nSTABILITY: half1 - half2 rms {d.std():.6f} '
+              f'({100 * d.std():.4f}% of unity), peak-to-peak {np.ptp(d):.6f}')
+        print(f'           superflat structure rms {flat.std():.6f} '
+              f'({100 * flat.std():.4f}%)  -> signal/instability '
+              f'{flat.std() / d.std():.1f}x')
+        halves = (h1, h2)
+    if a.plot:
+        plot(os.path.join(out_dir, a.name + '.png'), flat, halves, log)
+
+
+if __name__ == '__main__':
+    main()
