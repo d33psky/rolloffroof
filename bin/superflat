@@ -80,7 +80,7 @@ from astropy.io import fits
 from scipy import ndimage
 
 DATA_ROOT = os.path.expanduser('~/astro/data')
-OUT_ROOT = os.path.expanduser('~/astro/superflat')
+OUT_ROOT = os.path.expanduser('~/astro/data/superflat')
 FITS_EXT = ('.fits', '.fit', '.fts')
 # filter directory names differ per session (Lum / Luminance, Ha / Hydrogen-alpha)
 FILTER_ALIAS = {'lum': ('lum', 'luminance', 'l'), 'red': ('red', 'r'),
@@ -249,30 +249,6 @@ def plane_image(coef, shape):
     return coef[0] + coef[1] * xn + coef[2] * yn
 
 
-def build(files, dark, bpm, scales, planes, log):
-    """pixel-wise median over the normalised, plane-flattened frames, in row
-    bands so that memory stays bounded"""
-    H, W = dark.shape
-    rows = max(8, int(MASK_BAND / (len(files) * W * 4)))
-    out = np.zeros((H, W), np.float32)
-    for y0 in range(0, H, rows):
-        y1 = min(H, y0 + rows)
-        band = np.empty((len(files), y1 - y0, W), np.float32)
-        for i, f in enumerate(files):
-            with fits.open(f, memmap=True) as hd:
-                d = np.asarray(hd[0].section[y0:y1], np.float32)
-            d -= dark[y0:y1]
-            d /= scales[i]
-            d -= plane_image(planes[i], (H, W))[y0:y1] / scales[i]
-            band[i] = d + 1.0
-        out[y0:y1] = combine(band)
-        log(f'  rows {y0:5}..{y1:5}  ({100 * y1 // H:3d}%)')
-        del band
-    if bpm is not None:
-        out = fill_bad(out, bpm)
-    return out / float(np.mean(out[np.isfinite(out)]))
-
-
 def combine(band):
     """per-pixel median with the high side clipped away. Objects only ever add
     light, so rejection is deliberately asymmetric: a star that sits on the same
@@ -285,6 +261,22 @@ def combine(band):
     with np.errstate(invalid='ignore'):
         out = np.nanmedian(masked, axis=0)
     return np.where(np.isfinite(out), out, med)
+
+
+def load_bpm(path):
+    """APP's bad pixel map is uint8 with 127 = good and 255 = bad - it never
+    contains 0, so a plain astype(bool) marks the whole sensor bad. Take the
+    most common value as 'good' and everything else as bad."""
+    d = fits.getdata(path)
+    vals, counts = np.unique(d, return_counts=True)
+    good = vals[int(np.argmax(counts))]
+    bad = d != good
+    frac = float(bad.mean())
+    if frac > 0.2:
+        print(f'  bad pixel map marks {100 * frac:.1f}% of the sensor bad - ignoring it',
+              file=sys.stderr)
+        return None, frac
+    return bad, frac
 
 
 def fill_bad(img, bad):
@@ -363,6 +355,10 @@ def main():
     ap.add_argument('--name', default='all', metavar='NAME',
                     help='output basename under <out-root>/<equipment>/<filter>/ (default all)')
     ap.add_argument('--out-root', default=OUT_ROOT, metavar='DIR')
+    ap.add_argument('--scratch', metavar='DIR',
+                    help='where to put the normalised frame cube (default <out-root>/.cache; '
+                         'it is deleted afterwards, but on a snapshotted filesystem the space '
+                         'stays in the snapshots, so /var/tmp may be the better choice)')
     ap.add_argument('--write', action='store_true',
                     help='write the FITS (default: select, report and stop)')
     ap.add_argument('--plot', action='store_true', help='write a diagnostics PNG')
@@ -455,11 +451,21 @@ def main():
         print('\n(dry run - use --write to build the superflat)')
         return
 
-    # --- per frame: sky level and gradient
-    print('\nmeasuring frames:')
+    # --- per frame: subtract the dark, normalise, flatten the gradient, and
+    # park the result in a scratch cube. Reading the originals is the expensive
+    # part and the 16-bit files cannot be memory-mapped (BZERO/BSCALE), so every
+    # frame is read exactly once here and the combine works from the cube.
+    print('\nmeasuring and normalising frames:')
     dark_cache = {}
-    scales, planes, keep = [], [], []
-    for i, f in enumerate(sel):
+    H, W = fits.getdata(darks[next(iter(darks))]).shape
+    cache_dir = a.scratch or os.path.join(a.out_root, '.cache')
+    os.makedirs(cache_dir, exist_ok=True)
+    cube_path = os.path.join(cache_dir, f'{key}-{a.filter}-{os.getpid()}.f32')
+    print(f'  scratch cube {cube_path} '
+          f'({len(sel) * H * W * 4 / 1e9:.1f} GB, removed afterwards)')
+    cube = np.memmap(cube_path, np.float32, 'w+', shape=(len(sel), H, W))
+    scales, keep, n = [], [], 0
+    for f in sel:
         tdir, exp = f.split('/Light')[0], info[f]['exp']
         dp = darks[(tdir, exp)]
         if dp not in dark_cache:
@@ -467,43 +473,41 @@ def main():
         d = fits.getdata(f).astype(np.float32) - dark_cache[dp]
         med, coef = frame_scale_and_plane(d, None)
         if med <= 0:
+            print(f'  skipped (no sky level): {os.path.basename(f)}', file=sys.stderr)
             continue
-        scales.append(med); planes.append(coef); keep.append(f)
-        if (i + 1) % 50 == 0:
-            print(f'  {i + 1}/{len(sel)}')
-    print(f'  sky levels {np.min(scales):.1f} .. {np.max(scales):.1f} ADU '
+        d /= med
+        d -= plane_image(coef, (H, W)) / med
+        cube[n] = d + 1.0
+        scales.append(med); keep.append(f); n += 1
+        if n % 25 == 0:
+            print(f'  {n}/{len(sel)}')
+    cube.flush()
+    cube = cube[:n]
+    print(f'  {n} frames, sky levels {np.min(scales):.1f} .. {np.max(scales):.1f} ADU '
           f'(median {np.median(scales):.1f})')
 
-    bpm = fits.getdata(bpm_path).astype(bool) if bpm_path else None
-    # one dark per frame, in frame order
-    darkarr = np.zeros_like(dark_cache[next(iter(dark_cache))])
+    bpm, bpm_frac = load_bpm(bpm_path) if bpm_path else (None, 0.0)
+    if bpm is not None:
+        print(f'  bad pixel map: {100 * bpm_frac:.2f}% of pixels masked and interpolated')
     out_dir = os.path.join(a.out_root, key, a.filter)
 
-    def build_set(fs, sc, pl, tag):
-        print(f'\nbuilding {tag} from {len(fs)} frames:')
-        # frames can have different darks; subtract inside the band loop
-        H, W = darkarr.shape
-        rows = max(8, int(MASK_BAND / (max(1, len(fs)) * W * 4)))
+    def build_set(idx, tag):
+        """median over the frames named by idx, in row bands from the cube"""
+        print(f'\nbuilding {tag} from {len(idx)} frames:')
+        rows = max(8, int(MASK_BAND / (max(1, len(idx)) * W * 4)))
         res = np.zeros((H, W), np.float32)
         for y0 in range(0, H, rows):
             y1 = min(H, y0 + rows)
-            band = np.empty((len(fs), y1 - y0, W), np.float32)
-            for i, f in enumerate(fs):
-                dp = darks[(f.split('/Light')[0], info[f]['exp'])]
-                with fits.open(f, memmap=True) as hd:
-                    d = np.asarray(hd[0].section[y0:y1], np.float32)
-                d -= dark_cache[dp][y0:y1]
-                d /= sc[i]
-                d -= plane_image(pl[i], (H, W))[y0:y1] / sc[i]
-                band[i] = d + 1.0
-            res[y0:y1] = combine(band)
-            del band
+            res[y0:y1] = combine(cube[idx, y0:y1, :])
             print(f'  rows {y0:5}..{y1:5} ({100 * y1 // H:3d}%)')
         if bpm is not None:
             res = fill_bad(res, bpm)
-        return res / float(np.mean(res))
+        res = res / float(np.mean(res))
+        if not np.isfinite(res).all() or res.std() == 0:
+            sys.exit(f'{tag}: the result is constant or not finite - refusing to write it')
+        return res
 
-    flat = build_set(keep, scales, planes, a.name)
+    flat = build_set(np.arange(n), a.name)
     meta = dict(EQUIPKEY=key, FILTER=a.filter, NFRAMES=len(keep),
                 NTARGETS=len({f.split('/Light')[0] for f in keep}),
                 CLOCKING=round(ref, 3) if ref else 0, PIER=a.pier,
@@ -512,8 +516,8 @@ def main():
 
     halves = None
     if a.halves:
-        h1 = build_set(keep[0::2], scales[0::2], planes[0::2], a.name + '-half1')
-        h2 = build_set(keep[1::2], scales[1::2], planes[1::2], a.name + '-half2')
+        h1 = build_set(np.arange(0, n, 2), a.name + '-half1')
+        h2 = build_set(np.arange(1, n, 2), a.name + '-half2')
         write_out(os.path.join(out_dir, a.name + '-half1.fits'), h1, meta, log)
         write_out(os.path.join(out_dir, a.name + '-half2.fits'), h2, meta, log)
         d = h1 - h2
@@ -525,6 +529,8 @@ def main():
         halves = (h1, h2)
     if a.plot:
         plot(os.path.join(out_dir, a.name + '.png'), flat, halves, log)
+    del cube
+    os.unlink(cube_path)
 
 
 if __name__ == '__main__':
