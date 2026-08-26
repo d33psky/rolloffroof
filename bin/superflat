@@ -88,6 +88,19 @@ FILTER_ALIAS = {'lum': ('lum', 'luminance', 'l'), 'red': ('red', 'r'),
                 'ha': ('ha', 'halpha', 'h-alpha', 'hydrogen-alpha'),
                 'oiii': ('oiii', 'o3'), 'sii': ('sii', 's2')}
 MASK_BAND = 400e6           # bytes of frame data held at once
+CUBE_SCALE = 20000.0        # (value - 1) x this, stored as int16
+MASKED = 32767              # sentinel: above anything real, so always clipped
+
+
+def mem_available():
+    try:
+        with open('/proc/meminfo') as fh:
+            for line in fh:
+                if line.startswith('MemAvailable:'):
+                    return int(line.split()[1]) * 1024
+    except Exception:
+        pass
+    return 2e9
 
 
 def slug(s):
@@ -224,6 +237,25 @@ def measure_dither(files, n=16):
     return steps
 
 
+def source_mask_frame(d, cell=128, nsig=3.0, grow=8):
+    """Pixels that are bright IN THIS FRAME relative to its own local
+    background: stars, and the target object. Every target is centred in its
+    own frames, so without this the objects of all targets pile up on the same
+    part of the sensor and no amount of combining removes them. The background
+    is a coarse block median, so only structure smaller than ~2 cells is
+    masked - the flat's own rings and vignetting are far larger and survive."""
+    H, W = d.shape
+    hy, hx = H // cell, W // cell
+    blocks = d[:hy * cell, :hx * cell].reshape(hy, cell, hx, cell)
+    coarse = np.median(blocks, axis=(1, 3))
+    bg = ndimage.zoom(coarse, (H / hy, W / hx), order=1)[:H, :W]
+    resid = d - bg
+    sig = float(np.median(np.abs(resid)) * 1.4826)
+    m = resid > nsig * max(sig, 1e-9)
+    # box blur instead of iterated binary dilation: same effect, O(1) per pixel
+    return ndimage.uniform_filter(m.astype(np.float32), 2 * grow + 1) > 0
+
+
 def frame_scale_and_plane(d, valid):
     """sky level and the linear gradient of one dark-subtracted frame, both from
     a subsample of the faint pixels (objects excluded)"""
@@ -249,18 +281,25 @@ def plane_image(coef, shape):
     return coef[0] + coef[1] * xn + coef[2] * yn
 
 
-def combine(band):
-    """per-pixel median with the high side clipped away. Objects only ever add
-    light, so rejection is deliberately asymmetric: a star that sits on the same
-    sensor pixel in every frame of one target (no dither) still only pollutes
-    1/N of the frames, and this removes its wings as well."""
-    med = np.median(band, axis=0)
-    mad = np.median(np.abs(band - med), axis=0) * 1.4826
-    hi = med + 2.5 * np.maximum(mad, 1e-6)
-    masked = np.where(band <= hi, band, np.nan)
+def combine(raw):
+    """Per-pixel median of the frames that have valid data there, with the high
+    side clipped away (objects only ever add light).
+
+    Masked pixels are missing data, NOT a large value to be clipped: every
+    target is centred in its own frames, so near the sensor centre a majority of
+    frames can be masked at once, and a sentinel would then become the median
+    itself. Returns the result and the number of frames that contributed, so
+    that thin coverage is visible instead of silently interpolated."""
+    band = raw.astype(np.float32)
+    band[band >= MASKED] = np.nan
+    band = band / CUBE_SCALE + 1.0
     with np.errstate(invalid='ignore'):
-        out = np.nanmedian(masked, axis=0)
-    return np.where(np.isfinite(out), out, med)
+        med = np.nanmedian(band, axis=0)
+        mad = np.nanmedian(np.abs(band - med), axis=0) * 1.4826
+        band[band > med + 2.5 * np.maximum(mad, 1e-6)] = np.nan
+        out = np.nanmedian(band, axis=0)
+    count = np.count_nonzero(np.isfinite(band), axis=0)
+    return out, count
 
 
 def load_bpm(path):
@@ -458,13 +497,24 @@ def main():
     print('\nmeasuring and normalising frames:')
     dark_cache = {}
     H, W = fits.getdata(darks[next(iter(darks))]).shape
-    cache_dir = a.scratch or os.path.join(a.out_root, '.cache')
-    os.makedirs(cache_dir, exist_ok=True)
-    cube_path = os.path.join(cache_dir, f'{key}-{a.filter}-{os.getpid()}.f32')
-    print(f'  scratch cube {cube_path} '
-          f'({len(sel) * H * W * 4 / 1e9:.1f} GB, removed afterwards)')
-    cube = np.memmap(cube_path, np.float32, 'w+', shape=(len(sel), H, W))
-    scales, keep, n = [], [], 0
+    # the cube holds (value - 1) x CUBE_SCALE as int16: the frames sit within a
+    # few percent of 1.0, so this keeps 5e-5 precision (the structure we chase
+    # is ~2e-3) at half the bytes, and MASKED is a value no real pixel reaches,
+    # so the combine's high-side clip rejects masked pixels automatically.
+    need = len(sel) * H * W * 2
+    avail = mem_available()
+    if need < 0.5 * avail:
+        print(f'  cube in RAM ({need / 1e9:.1f} GB of {avail / 1e9:.1f} GB available)')
+        cube = np.empty((len(sel), H, W), np.int16)
+        cube_path = None
+    else:
+        cache_dir = a.scratch or os.path.join(a.out_root, '.cache')
+        os.makedirs(cache_dir, exist_ok=True)
+        cube_path = os.path.join(cache_dir, f'{key}-{a.filter}-{os.getpid()}.i16')
+        print(f'  cube on disk: {cube_path} ({need / 1e9:.1f} GB, removed afterwards; '
+              f'only {avail / 1e9:.1f} GB RAM available)')
+        cube = np.memmap(cube_path, np.int16, 'w+', shape=(len(sel), H, W))
+    scales, keep, n, maskfrac = [], [], 0, []
     for f in sel:
         tdir, exp = f.split('/Light')[0], info[f]['exp']
         dp = darks[(tdir, exp)]
@@ -477,14 +527,23 @@ def main():
             continue
         d /= med
         d -= plane_image(coef, (H, W)) / med
-        cube[n] = d + 1.0
+        d += 1.0
+        m = source_mask_frame(d)
+        maskfrac.append(float(m.mean()))
+        v = np.clip((d - 1.0) * CUBE_SCALE, -30000, 30000).astype(np.int16)
+        v[m] = MASKED
+        cube[n] = v
         scales.append(med); keep.append(f); n += 1
         if n % 25 == 0:
-            print(f'  {n}/{len(sel)}')
-    cube.flush()
+            print(f'  {n}/{len(sel)}  (last frame masked {100 * maskfrac[-1]:.1f}%)')
+    if cube_path:
+        cube.flush()
     cube = cube[:n]
     print(f'  {n} frames, sky levels {np.min(scales):.1f} .. {np.max(scales):.1f} ADU '
           f'(median {np.median(scales):.1f})')
+    print(f'  per-frame source mask: {100 * np.median(maskfrac):.1f}% of pixels '
+          f'(median over frames), so every pixel is still covered by '
+          f'~{n * (1 - np.median(maskfrac)):.0f} frames')
 
     bpm, bpm_frac = load_bpm(bpm_path) if bpm_path else (None, 0.0)
     if bpm is not None:
@@ -496,10 +555,16 @@ def main():
         print(f'\nbuilding {tag} from {len(idx)} frames:')
         rows = max(8, int(MASK_BAND / (max(1, len(idx)) * W * 4)))
         res = np.zeros((H, W), np.float32)
+        cnt = np.zeros((H, W), np.int32)
         for y0 in range(0, H, rows):
             y1 = min(H, y0 + rows)
-            res[y0:y1] = combine(cube[idx, y0:y1, :])
+            res[y0:y1], cnt[y0:y1] = combine(cube[idx, y0:y1, :])
             print(f'  rows {y0:5}..{y1:5} ({100 * y1 // H:3d}%)')
+        thin = cnt < max(3, len(idx) // 10)
+        if thin.any():
+            print(f'  thin coverage: {100 * thin.mean():.2f}% of pixels have fewer than '
+                  f'{max(3, len(idx) // 10)} frames (min {cnt.min()}) - interpolated')
+            res = fill_bad(res, thin | ~np.isfinite(res))
         if bpm is not None:
             res = fill_bad(res, bpm)
         res = res / float(np.mean(res))
@@ -530,7 +595,8 @@ def main():
     if a.plot:
         plot(os.path.join(out_dir, a.name + '.png'), flat, halves, log)
     del cube
-    os.unlink(cube_path)
+    if cube_path:
+        os.unlink(cube_path)
 
 
 if __name__ == '__main__':
