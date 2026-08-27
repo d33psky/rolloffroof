@@ -219,6 +219,48 @@ def master_pool(root):
                   glob.glob(os.path.join(root, '*', '*', 'M*-*.fits')))
 
 
+def star_map(a):
+    hp = a - ndimage.median_filter(a, 7)
+    sig = float(np.median(np.abs(hp)) * 1.4826)
+    return np.clip(hp / max(sig, 1e-6) - 4, 0, 30)
+
+
+def measure_dither(files, n=16):
+    """Real dither, in pixels: the star field shift between consecutive subs of
+    one night, by FFT cross correlation. NOT from CRVAL - that is the mount's
+    reported pointing, which shows the offsets that were commanded, not the ones
+    the guider actually let happen (measured 2026-08-26: three targets reported
+    dither steps while their stars never moved)."""
+    by_night = defaultdict(list)
+    for f in files:
+        m = re.search(r'(\d{4}-\d{2}-\d{2})T', os.path.basename(f))
+        by_night[m.group(1) if m else '?'].append(f)
+    if not by_night:
+        return None
+    night = max(by_night, key=lambda k: len(by_night[k]))
+    # consecutive frames of that night, taken from the directory itself: the
+    # superflat's own selection is spread out and would miss a dither that only
+    # happens every few frames
+    d = os.path.dirname(by_night[night][0])
+    fs = sorted(f for f in glob.glob(d + '/*')
+                if os.path.basename(f).startswith(night) and f.lower().endswith(FITS_EXT))
+    fs = fs[len(fs) // 3:][:n]
+    if len(fs) < 4:
+        return None
+    steps, prev = [], None
+    for f in fs:
+        sm = star_map(fits.getdata(f).astype(np.float32))
+        if prev is not None and sm.shape == prev.shape:
+            A, B = np.fft.rfft2(sm), np.fft.rfft2(prev)
+            r = np.fft.irfft2(A * np.conj(B), s=sm.shape)
+            dy, dx = np.unravel_index(np.argmax(r), r.shape)
+            dy -= sm.shape[0] if dy > sm.shape[0] // 2 else 0
+            dx -= sm.shape[1] if dx > sm.shape[1] // 2 else 0
+            steps.append(float(np.hypot(dx, dy)))
+        prev = sm
+    return steps or None
+
+
 def source_mask_frame(d, cell=128, nsig=3.0, grow=8):
     """Pixels that are bright IN THIS FRAME relative to its own local
     background: stars, and the target object. Every target is centred in its
@@ -647,8 +689,22 @@ def main():
 
     halves = None
     if a.halves:
-        h1 = build_set(valid[0::2], a.name + '-half1')
-        h2 = build_set(valid[1::2], a.name + '-half2')
+        # split stratified by target and pier side, not by simple alternation:
+        # residual sky flux lands 180 deg apart on the sensor for east and west
+        # frames, so an unbalanced split shows up as an antisymmetric red/blue
+        # pattern in the difference and inflates the apparent instability
+        strata = defaultdict(list)
+        for j, i in enumerate(valid):
+            f = keep[j]
+            strata[(f.split('/Light')[0], info[f]['pier'][0])].append(i)
+        i1, i2 = [], []
+        for k in sorted(strata):
+            i1 += strata[k][0::2]
+            i2 += strata[k][1::2]
+        print(f'\nhalves stratified over {len(strata)} target/pier groups: '
+              f'{len(i1)} vs {len(i2)} frames')
+        h1 = build_set(np.array(sorted(i1)), a.name + '-half1')
+        h2 = build_set(np.array(sorted(i2)), a.name + '-half2')
         write_out(os.path.join(out_dir, a.name + '-half1.fits'), h1, meta, log)
         write_out(os.path.join(out_dir, a.name + '-half2.fits'), h2, meta, log)
         d = h1 - h2
