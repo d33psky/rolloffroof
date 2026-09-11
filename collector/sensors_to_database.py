@@ -49,13 +49,10 @@ values = values_str.split(':')
 
 utcnow = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
 
-database = MySQLdb.connect(
-    host="localhost",
-    port=3306,
-    user='sens',
-    passwd='sens',
-    db="observatory1")
-db_cursor = database.cursor()
+# A row is abandoned when it gets this old: loops.pl runs a ~60 s cycle, so a
+# row older than this means the sender skipped a beat and the next value starts
+# a fresh row instead of being filed under a stale create_time.
+max_row_age_seconds = 90
 
 db_mapper = {
     'tempandhum-observatory.rrd': 'observatory',
@@ -67,9 +64,15 @@ db_mapper = {
     'rainsensor.rrd'            : 'rainsensor1',
     'tempandhum-picambucket.rrd': 'allskycam1',
     'allskycamstars.rrd'        : 'allskycam1',
-    'ups.rrd'                   : 'ups1'
+    'ups.rrd'                   : 'ups1',
+    'cloud-sensor-heater.rrd'       : 'cloud_sensor_heater',
+    'cloud-sensor-heater-detail.rrd': 'cloud_sensor_heater'
 }
-field_name_1 = db_mapper.get(db, "Unknown DB")
+field_name_1 = db_mapper.get(db)
+if field_name_1 is None:
+    print("sensors_to_database: unknown RRD '{}', add it to db_mapper and to the sensors table".format(db),
+          file=sys.stderr)
+    sys.exit(1)
 #print("db {}".format(field_name_1))
 
 key_mapper = {
@@ -93,7 +96,10 @@ key_mapper = {
     'timeleft'    : 'timeleft',
     'itemp'       : 'itemp',
     'battv'       : 'battv',
-    'linefreq'    : 'linefreq'
+    'linefreq'    : 'linefreq',
+    'state'         : 'state',
+    'wet_active'    : 'wet_active',
+    'margin_active' : 'margin_active'
 }
 
 sql_keys = []
@@ -101,20 +107,42 @@ sql_values = []
 sql_assignments = []
 i = 0
 while i < len(keys):
-    field_name_2 = key_mapper.get(keys[i], "Unknown KEY")
+    field_name_2 = key_mapper.get(keys[i])
+    if field_name_2 is None:
+        print("sensors_to_database: unknown key '{}' in {}, add it to key_mapper and to the sensors table".format(keys[i], db),
+              file=sys.stderr)
+        sys.exit(1)
     sql_keys.append("{}_{}".format(field_name_1, field_name_2))
     sql_values.append("{}".format(values[i+1]))
     #print("{}_{} = {}".format(field_name_1, keys[i], values[i+1]))
     sql_assignments.append("{}_{}={}".format(field_name_1, field_name_2, values[i+1]))
     i += 1
 
+database = MySQLdb.connect(
+    host="localhost",
+    port=3306,
+    user='sens',
+    passwd='sens',
+    db="observatory1")
+db_cursor = database.cursor()
+
+# Decide whether this value belongs in the newest row or starts a new one.
+# Each sensor reports once per loops.pl cycle, so finding our own fields
+# already filled in means a new cycle has begun. That test is independent of
+# timing, unlike the old "newest row is older than 60 s" rule: loops.pl runs a
+# ~60 s cycle, the same length as that window, so from 2026-06-16 (when the
+# broken pin-16 DHT22 read that used to stretch the cycle to ~100 s was
+# removed) the boundary fell in the middle of batches and split them across two
+# rows, leaving ~20% of the fields NULL. max_row_age_seconds is the fallback
+# for a sender that skipped a beat.
 sql = """
   SELECT sensors_id
          ,create_time
+         ,{keys}
     FROM sensors
 ORDER BY create_time DESC
    LIMIT 1;
-"""
+""".format(keys = ','.join(sql_keys))
 db_cursor.execute(sql)
 db_result_tuple = db_cursor.fetchone()
 #print(db_result_tuple)
@@ -126,8 +154,15 @@ except:
     db_date = utcnow
     must_insert = True
 
-if must_insert or db_date < datetime.datetime.now(datetime.UTC).replace(tzinfo=None) - datetime.timedelta(minutes=1) :
-    print("{} is More than a minute ago -> INSERT".format(db_date))
+if not must_insert:
+    if any(value is not None for value in db_result_tuple[2:]):
+        print("Row {} already holds {} -> INSERT".format(row_id, ','.join(sql_keys)))
+        must_insert = True
+    elif db_date < utcnow - datetime.timedelta(seconds=max_row_age_seconds):
+        print("Row {} created {} is older than {} s -> INSERT".format(row_id, db_date, max_row_age_seconds))
+        must_insert = True
+
+if must_insert:
 
     print("Hack: but first call ./query_sky_and_obsy_conditions.py")
     subprocess.call("./query_sky_and_obsy_conditions.py")
@@ -141,7 +176,7 @@ INSERT INTO observatory1.sensors ({keys})
     """.format(keys = ','.join(sql_keys),
                values = ','.join(sql_values))
 else:
-    #print("{} is Less than a minute ago -> UPDATE".format(db_date))
+    #print("Row {} does not hold {} yet -> UPDATE".format(row_id, ','.join(sql_keys)))
     sql = """
 UPDATE observatory1.sensors
    SET {assignment_list}

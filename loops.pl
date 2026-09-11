@@ -6,6 +6,11 @@ use strict;
 # Remote RRD server and port
 my $rrd_server = "192.168.100.81";
 my $port = 7777;
+
+# Oldest /dev/shm/rrdupdate_* file we still consider current. The loop below
+# runs a ~60 s cycle and read_rg11_rainsensor writes on its own ~60 s cycle,
+# so 90 s tolerates the drift between them without passing on stale readings.
+my $max_file_age_seconds = 90;
  
 sub sendToRRD ($) {
 	my $message = shift;
@@ -198,6 +203,20 @@ while (1) {
 	printf(strftime("%Y%m%d_%H%M%S", localtime) ." Done reading, send rrds:\n");
 	while ( </dev/shm/rrdupdate*> ) {
 		my $file = $_;
+
+		# Readers only rewrite their file on a successful read, so a dead
+		# reader leaves its last value behind and we would resend it every
+		# cycle as if it were current - silently, forever. The pin-16 DHT22 did
+		# exactly that from 2026-06-16: three months of 25.40 C / 15.00 % in
+		# the RRD and the database. Skip what the readers have not refreshed;
+		# the receiver then stores NULL and query_sky_and_obsy_conditions.py
+		# closes on "no data" instead of trusting a frozen reading.
+		my $age = time - (stat($file))[9];
+		if ($age > $max_file_age_seconds) {
+			printf(strftime("%Y%m%d_%H%M%S", localtime) . " $file: SKIP, not updated for ${age}s\n");
+			next;
+		}
+
 		open my $fh, '<', $file or die "can't open $file: $!";
 		my @lines = <$fh>;
 		close $fh or die "can't close $file: $!";

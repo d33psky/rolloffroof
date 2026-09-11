@@ -43,20 +43,46 @@ def check_db(minutes):
         print("DB last timestamp {db_date} is Less than {minutes} minutes ago -> open".format(db_date=db_date, minutes=minutes))
         return(sensors_id)
 
-def check_sqm(sensors_id, sqm_min):
+def fetch_sensor_values(sensors_id, expressions, label):
+    """Read expressions from one sensors row, falling back to the row before it
+    when a value is NULL, and return None when neither row has data.
+
+    A NULL means the sensor did not report: either loops.pl skipped a stale
+    /dev/shm/rrdupdate_* file because its reader died, or the row was split
+    across a cycle boundary. One missing sample must not decide anything (a
+    "closing" event locks the roof shut for an hour), so retry the previous row
+    first - the same trick check_ups_is_on_mains has always used for the UPS
+    selftest. Two rows without data means the sensor really is gone, and the
+    caller turns that into a close with a "no data" reason."""
+    db_result_tuple = read_sensor_row(sensors_id, expressions)
+    if db_result_tuple is not None:
+        return db_result_tuple
+    print("{label} has no data in row {sensors_id}, trying the row before it".format(label=label, sensors_id=sensors_id))
+    db_result_tuple = read_sensor_row(sensors_id - 1, expressions)
+    if db_result_tuple is None:
+        print("{label} has no data in rows {previous_id} and {sensors_id} -> close".format(label=label, previous_id=sensors_id - 1, sensors_id=sensors_id))
+    return db_result_tuple
+
+def read_sensor_row(sensors_id, expressions):
+    """Return one sensors row as a tuple, or None if it is missing or any of
+    the requested values is NULL."""
     sql = """
-      SELECT sqm1_sqm
+      SELECT {expressions}
         FROM sensors
        WHERE sensors_id = {sensors_id}
        LIMIT 1;
-    """.format(sensors_id=sensors_id)
+    """.format(expressions=','.join(expressions), sensors_id=sensors_id)
     db_cursor.execute(sql)
     db_result_tuple = db_cursor.fetchone()
-    #print(db_result_tuple)
-    try:
-        sqm  = db_result_tuple[0]
-    except:
-        raise
+    if db_result_tuple is None or any(value is None for value in db_result_tuple):
+        return None
+    return db_result_tuple
+
+def check_sqm(sensors_id, sqm_min):
+    db_result_tuple = fetch_sensor_values(sensors_id, ['sqm1_sqm'], 'SQM')
+    if db_result_tuple is None:
+        return(None)
+    sqm = db_result_tuple[0]
     if sqm >= sqm_min:
         print("SQM {sqm} >= minimum {sqm_min} -> open".format(sqm=sqm, sqm_min=sqm_min))
         return(True)
@@ -87,19 +113,10 @@ def check_sqm_past(sqm_min, seconds, outlier_count_max):
         return(False)
 
 def check_rain(sensors_id, drops_min):
-    sql = """
-      SELECT rainsensor1_drops
-        FROM sensors
-       WHERE sensors_id = {sensors_id}
-       LIMIT 1;
-    """.format(sensors_id=sensors_id)
-    db_cursor.execute(sql)
-    db_result_tuple = db_cursor.fetchone()
-    #print(db_result_tuple)
-    try:
-        drops  = db_result_tuple[0]
-    except:
-        raise
+    db_result_tuple = fetch_sensor_values(sensors_id, ['rainsensor1_drops'], 'Rain sensor')
+    if db_result_tuple is None:
+        return(None)
+    drops = db_result_tuple[0]
     if drops <= drops_min:
         print("Rain drops {drops} <= minimum {drops_min} -> open".format(drops=drops, drops_min=drops_min))
         return(True)
@@ -129,20 +146,11 @@ def check_rain_past(drops_min, seconds, outlier_count_max):
         return(False)
 
 def check_ups_is_on_mains(sensors_id, min_ups_bcharge):
-    sql = """
-      SELECT ups1_status, ups1_bcharge
-        FROM sensors
-       WHERE sensors_id = {sensors_id}
-       LIMIT 1;
-    """.format(sensors_id=sensors_id)
-    db_cursor.execute(sql)
-    db_result_tuple = db_cursor.fetchone()
-#    print(db_result_tuple)
-    try:
-        ups_status  = db_result_tuple[0]
-        ups_bcharge = db_result_tuple[1]
-    except:
-        raise
+    db_result_tuple = fetch_sensor_values(sensors_id, ['ups1_status', 'ups1_bcharge'], 'UPS')
+    if db_result_tuple is None:
+        return(None)
+    ups_status  = db_result_tuple[0]
+    ups_bcharge = db_result_tuple[1]
     if ups_status == 1 and ups_bcharge >= min_ups_bcharge:
         print("UPS is powered and battery charge {bcharge} >= {min_ups_bcharge} -> open".format(bcharge=ups_bcharge, min_ups_bcharge=min_ups_bcharge))
         return True
@@ -154,23 +162,15 @@ def check_ups_is_on_mains(sensors_id, min_ups_bcharge):
         return False
 
 def check_infrared(sensors_id, sensor, minimum_delta_t):
-    sql = """
-      SELECT {sensor}_temperature_sensor
-             , {sensor}_temperature_sky
-             , {sensor}_temperature_sensor - {sensor}_temperature_sky
-        FROM sensors
-       WHERE sensors_id = {sensors_id}
-       LIMIT 1;
-    """.format(sensor=sensor, sensors_id=sensors_id)
-    db_cursor.execute(sql)
-    db_result_tuple = db_cursor.fetchone()
-    #print(db_result_tuple)
-    try:
-        temperature_sensor = db_result_tuple[0]
-        temperature_sky    = db_result_tuple[1]
-        delta_t            = db_result_tuple[2]
-    except:
-        raise
+    expressions = ["{sensor}_temperature_sensor".format(sensor=sensor),
+                   "{sensor}_temperature_sky".format(sensor=sensor),
+                   "{sensor}_temperature_sensor - {sensor}_temperature_sky".format(sensor=sensor)]
+    db_result_tuple = fetch_sensor_values(sensors_id, expressions, "Sensor {sensor}".format(sensor=sensor))
+    if db_result_tuple is None:
+        return(None)
+    temperature_sensor = db_result_tuple[0]
+    temperature_sky    = db_result_tuple[1]
+    delta_t            = db_result_tuple[2]
     if delta_t >= minimum_delta_t:
         print("Sensor {sensor} sky temperature delta ({temperature_sensor} - {temperature_sky} = {delta_t}) >= {minimum_delta_t} -> open".format(sensor=sensor, temperature_sensor=temperature_sensor, temperature_sky=temperature_sky, delta_t=delta_t, minimum_delta_t=minimum_delta_t))
         return(True)
@@ -376,6 +376,7 @@ def main():
 #    sqm_now_ok       = check_sqm(sensors_id, sqm_min=16.5 - sqm_min_hysterese)
     rain_now_ok      = check_rain(sensors_id, drops_min=1)
     ups_now_ok1      = check_ups_is_on_mains(sensors_id, 99.0)
+    ups_now_ok2      = None
     if ups_now_ok1 is False:
         # might be self-test. check previous minute
         ups_now_ok2  = check_ups_is_on_mains(sensors_id - 1, 99.0)
@@ -401,7 +402,12 @@ def main():
     else:
         reason_close.append("DB not ok")
 
-    if sqm_now_ok:
+    # A check returns None when its sensor has no data at all (see
+    # fetch_sensor_values). That is a close, but it needs its own reason: the
+    # generic wording below would blame the sky for a dead sensor.
+    if sqm_now_ok is None:
+        reason_close.append("SQM has no data")
+    elif sqm_now_ok:
         if sqm_past_ok:
             reason_open.append("Dark long enough")
         else:
@@ -412,7 +418,9 @@ def main():
         else:
             reason_close.append("Still not dark enough")
 
-    if rain_now_ok:
+    if rain_now_ok is None:
+        reason_close.append("Rain sensor has no data")
+    elif rain_now_ok:
         if rain_past_ok:
             reason_open.append("Dry long enough")
         else:
@@ -423,7 +431,10 @@ def main():
         else:
             reason_close.append("Still raining")
 
-    if ups_now_ok1:
+    if ups_now_ok1 is None and ups_now_ok2 is None:
+        reason_close.append("UPS has no data")
+        ups_now_ok = False
+    elif ups_now_ok1:
         reason_open.append("UPS works")
         ups_now_ok = True
     else:
@@ -434,7 +445,9 @@ def main():
             reason_close.append("UPS on battery")
             ups_now_ok = False
 
-    if infrared1_now_ok or infrared2_now_ok:
+    if infrared1_now_ok is None and infrared2_now_ok is None:
+        reason_close.append("Cloud sensors have no data")
+    elif infrared1_now_ok or infrared2_now_ok:
         if infrared1_past_ok or infrared2_past_ok:
             reason_open.append("Clear long enough")
         else:
